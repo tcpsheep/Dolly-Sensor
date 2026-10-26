@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Dolly Sensor</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">D</div>
+        <div>
+          <div class="brand">Dolly Sensor</div>
+          <div class="brand-sub">protected network sentry</div>
+        </div>
+      </div>
+      <nav class="nav" aria-label="Dashboard sections">
+        <a class="nav-link" data-route="overview" href="#/overview">Overview</a>
+        <a class="nav-link" data-route="protected" href="#/protected">Protected IPs</a>
+        <a class="nav-link" data-route="intelligence" href="#/intelligence">Intelligence</a>
+        <a class="nav-link" data-route="inspector" href="#/inspector">Inspector</a>
+        <a class="nav-link" data-route="connections" href="#/connections">Connections</a>
+        <a class="nav-link" data-route="blocklist" href="#/blocklist">Blocklist</a>
+        <a class="nav-link" data-route="rules" href="#/rules">Rules</a>
+        <a class="nav-link" data-route="mitigation" href="#/mitigation">Mitigation</a>
+        <a class="nav-link" data-route="settings" href="#/settings">Settings</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="live-row"><span id="live-dot" class="dot dot-idle"></span><span id="live-label">connecting</span></div>
+        <div class="side-note">BGP is off by default. Mitigations are simulated unless explicitly armed.</div>
+      </div>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <div class="page-heading">
+          <div id="page-title" class="page-title">Overview</div>
+          <div id="page-subtitle" class="page-subtitle">Traffic, evidence, and decisions at a glance</div>
+        </div>
+        <div class="topbar-status">
+          <span id="sim-pill" class="pill pill-muted">SIMULATION</span>
+          <span id="bgp-pill" class="pill pill-muted">BGP disabled</span>
+          <span id="version-pill" class="pill pill-ghost">v—</span>
+        </div>
+      </header>
+      <main id="content" class="content" aria-live="polite">
+        <div class="loading-block"><span class="spinner"></span> Loading dashboard…</div>
+      </main>
+    </div>
+  </div>
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+  <div id="drawer-root"></div>
+  <noscript><div class="noscript">Dolly Sensor's dashboard requires JavaScript. The JSON API remains available.</div></noscript>
+  <script src="/assets/app.js"></script>
+  <script src="/assets/views.js"></script>
+</body>
+</html>

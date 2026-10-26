@@ -1,0 +1,6 @@
+# Dolly Sensor example blocklist feed.
+# Every non-comment line is an IP address or CIDR prefix.
+# These are documentation-only addresses from special-purpose ranges.
+# Replace this file with your own feed, or remove it before production.
+192.0.2.66
+198.18.0.0/15

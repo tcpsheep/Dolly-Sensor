@@ -1,0 +1,4 @@
+# Dolly Sensor manual blocklist.
+# The dashboard manages this file. Lines starting with # are ignored.
+# Add one IP address or CIDR prefix per line. For example:
+# 192.0.2.99

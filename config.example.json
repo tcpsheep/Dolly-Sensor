@@ -1,0 +1,92 @@
+{
+  "collector": {
+    "listen": "0.0.0.0:6343",
+    "workers": 4,
+    "queue": 8192,
+    "read_buffer_bytes": 8388608
+  },
+  "dashboard": {
+    "listen": "127.0.0.1:8080"
+  },
+  "protected_cidrs": [
+    "203.0.113.0/24"
+  ],
+  "trusted_sources": [],
+  "detection": {
+    "sensitivity": "balanced",
+    "network_type": "office",
+    "evaluation_interval": "1s",
+    "rate_window_seconds": 5,
+    "cooldown": "10m",
+    "warmup_windows": 30,
+    "trust_exemption_score": 70,
+    "out_of_state_min_pps": 100,
+    "pps_floor_override": 0,
+    "bps_floor_override": 0,
+    "threat_threshold_override": 0,
+    "persistence_override": 0
+  },
+  "mitigation": {
+    "blocklist_dir": "./examples/blocklists",
+    "manual_file": "manual.txt",
+    "auto_block": false,
+    "duration": "1m",
+    "dedup_window": "5m",
+    "max_active": 64,
+    "rate_limit_mbps": 10,
+    "history_limit": 500
+  },
+  "rules": {
+    "enabled": true,
+    "file": "./data/rules.json",
+    "max_rules": 128,
+    "max_flows_per_rule": 8192,
+    "evaluation_queue": 4096,
+    "allow_destination_discard": false
+  },
+  "protocols": {
+    "ftp": {
+      "enabled": true,
+      "control_rate_limit_pps": 50,
+      "data_rate_limit_pps": 500,
+      "exempt_trust_score": 70,
+      "max_command_bytes": 512,
+      "block_duration": "1m"
+    }
+  },
+  "bgp": {
+    "enabled": false,
+    "local_as": 64512,
+    "peer_as": 64512,
+    "peer_ip": "",
+    "peer_port": 179,
+    "local_addr": "",
+    "community": "65535:666",
+    "next_hop": "",
+    "router_id": "",
+    "hold_time": "1m30s",
+    "connect_timeout": "5s"
+  },
+  "alerting": {
+    "webhook_url": "",
+    "format": "discord",
+    "timeout": "5s",
+    "retries": 2
+  },
+  "persistence": {
+    "profile_file": "./data/profiles.json",
+    "save_interval": "30s"
+  },
+  "memory": {
+    "packet_buffer": 5000,
+    "alert_history": 500,
+    "destination_stats_ttl": "10m",
+    "baseline_ttl": "30m",
+    "tcp_session_ttl": "5m",
+    "tcp_pending_ttl": "10s",
+    "max_tcp_sessions": 100000,
+    "max_profiles": 10000,
+    "trust_decay_interval": "15m",
+    "ftp_state_ttl": "5m"
+  }
+}
