@@ -1018,7 +1018,7 @@
         el("div", { class: "view-lede", text: "A best-effort view of plausible TCP conversations. Sampling frequently misses handshakes, so an empty table or an incomplete handshake is not proof of malicious traffic." }),
         el("div", { class: "view-actions" }, refreshButton()),
       ),
-      stateful ? null : el("div", { class: "banner banner-warn" }, el("strong", { text: "Stateless protection. " }), "detection.stateful is false, so connection tracking, out-of-state TCP evidence, and handshake trust are disabled. Detection still uses sampled rates, protocol and SYN mixes, reputation, blocklists, and application rules."),
+      stateful ? null : el("div", { class: "banner banner-info" }, el("strong", { text: "Stateless protection. " }), "detection.stateful is false (the default), so the sensor keeps no connection table. Out-of-state TCP evidence, handshake trust, and this view are inactive. Detection still uses sampled rates, protocol and SYN mixes, reputation, blocklists, and application rules."),
       el("div", { class: "grid-kpi" },
         kpi("Protection", stateful ? "stateful" : "stateless", stateful ? "TCP session tracking" : "no connection table", { variant: stateful ? "good" : "warn" }),
         kpi("Established", fmtInt(stats.established), "sessions", { variant: "good" }),

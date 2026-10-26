@@ -13,7 +13,7 @@
   ],
   "trusted_sources": [],
   "detection": {
-    "stateful": true,
+    "stateful": false,
     "evaluation_interval": "1s",
     "rate_window_seconds": 5,
     "cooldown": "10m",

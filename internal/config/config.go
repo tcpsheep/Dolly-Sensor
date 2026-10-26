@@ -83,8 +83,9 @@ type DashboardConfig struct {
 }
 
 type DetectionConfig struct {
-	// Stateful enables TCP session tracking. When false the sensor still scores
-	// sampled rates and protocol mixes, but it does not infer connections,
+	// Stateful enables TCP session tracking. It is off by default because sampled
+	// sFlow often cannot reconstruct connections; when false the sensor still
+	// scores sampled rates and protocol mixes, but it does not infer connections,
 	// report out-of-state traffic, or credit handshakes and long sessions.
 	Stateful            bool     `json:"stateful"`
 	EvaluationInterval  Duration `json:"evaluation_interval"`
@@ -196,7 +197,7 @@ func Default() Config {
 		ProtectedCIDRs: nil,
 		TrustedSources: nil,
 		Detection: DetectionConfig{
-			Stateful:            true,
+			Stateful:            false,
 			EvaluationInterval:  Duration(time.Second),
 			RateWindowSeconds:   5,
 			Cooldown:            Duration(10 * time.Minute),
@@ -359,9 +360,6 @@ func (c *Config) Validate() ([]string, error) {
 	}
 	if c.Detection.BPSFloor <= 0 {
 		errs = append(errs, errors.New("detection.bps_floor must be positive"))
-	}
-	if !c.Detection.Stateful {
-		warnings = append(warnings, "detection.stateful is disabled; TCP session tracking, out-of-state findings, handshake trust, and the Connections view are inactive")
 	}
 
 	if strings.TrimSpace(c.Mitigation.BlocklistDir) == "" {

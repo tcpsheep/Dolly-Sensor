@@ -411,7 +411,7 @@ directly; there are no network-type or sensitivity presets to select.
 
 ```json
 "detection": {
-  "stateful": true,
+  "stateful": false,
   "threshold": 70,
   "persistence": 5,
   "pps_floor": 10000,
@@ -425,12 +425,13 @@ directly; there are no network-type or sensitivity presets to select.
 }
 ```
 
-- `stateful` — when `true`, the sensor tracks TCP handshakes and sessions for
-  out-of-state findings, handshake and long-session trust credit, and the Connections
-  view. When `false`, protection is stateless: no connection table is maintained, and
-  detection relies on sampled rates, protocol and SYN mixes, reputation, blocklists,
-  and application rules. Stateless mode is a reasonable choice when sampled sFlow
-  telemetry cannot reconstruct connections reliably.
+- `stateful` — opt-in TCP session tracking. When `true`, the sensor tracks TCP
+  handshakes and sessions for out-of-state findings, handshake and long-session trust
+  credit, and the Connections view. The default is `false`: protection is stateless,
+  no connection table is maintained, and detection relies on sampled rates, protocol
+  and SYN mixes, reputation, blocklists, and application rules. Stateless is the
+  default because sampled sFlow often cannot reconstruct connections reliably; enable
+  stateful tracking only when the sampling ratio is dense enough to see handshakes.
 - `threshold` — threat score (1–100) that starts the persistence counter.
 - `persistence` — consecutive evaluation windows the score must stay above the
   threshold before an attack is declared.

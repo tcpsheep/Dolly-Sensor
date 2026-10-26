@@ -363,7 +363,7 @@ Detection is a funnel, not a single detector. Each layer has a different cost, c
 
 **Why here:** It catches protocol-level abuse that a simple volume threshold would miss, and it helps explain a volumetric spike.
 
-**Caveat:** Sampled traffic does not always include the handshake. A legitimate mid-stream packet can look out-of-state simply because the sensor missed the beginning. This layer must therefore be corroborated by rate or other evidence, never used alone on a single packet. Because that reconstruction is unreliable with some sFlow deployments, the entire layer is optional: `detection.stateful: false` disables the connection table, out-of-state evidence, and handshake trust, and detection falls back to the remaining layers.
+**Caveat:** Sampled traffic does not always include the handshake. A legitimate mid-stream packet can look out-of-state simply because the sensor missed the beginning. This layer must therefore be corroborated by rate or other evidence, never used alone on a single packet. Because that reconstruction is unreliable with some sFlow deployments, the entire layer is optional and off by default: `detection.stateful: false` disables the connection table, out-of-state evidence, and handshake trust, and detection falls back to the remaining layers. Enable it only when sampling is dense enough to see handshakes regularly.
 
 ### Layer 4 — Application and protocol filters
 
@@ -604,10 +604,10 @@ The absolute floors are also explicit. `detection.pps_floor` and `detection.bps_
 
 Layers 3 and 5 assume the sensor can reconstruct enough TCP behavior to distinguish a handshake from an established session. With sampled sFlow that is not always true. The sensor therefore exposes the choice directly through `detection.stateful`:
 
-- **Stateful (`true`, default):** maintain a bounded TCP session table, use out-of-state traffic as evidence, credit completed handshakes and long-lived sessions when computing trust, and expose the Connections view.
-- **Stateless (`false`):** keep no connection table. Out-of-state findings and handshake trust are disabled, and the Connections view explains that tracking is off. Detection still uses sampled rates, protocol and SYN mixes, source reputation, blocklists, and application rules.
+- **Stateful (`true`, opt-in):** maintain a bounded TCP session table, use out-of-state traffic as evidence, credit completed handshakes and long-lived sessions when computing trust, and expose the Connections view.
+- **Stateless (`false`, default):** keep no connection table. Out-of-state findings and handshake trust are disabled, and the Connections view explains that tracking is off. Detection still uses sampled rates, protocol and SYN mixes, source reputation, blocklists, and application rules.
 
-Neither mode is universally correct. Stateful is stronger when the sampling ratio is dense enough to see most handshakes. Stateless is honest when the telemetry cannot support that claim, and it avoids the false confidence of a connection table assembled from incomplete samples.
+Stateless is the default because sampled sFlow often cannot reconstruct connections reliably. Stateful is stronger when the sampling ratio is dense enough to see most handshakes. Neither mode is universally correct: stateless avoids the false confidence of a connection table assembled from incomplete samples.
 
 ### 13.6 Cooldown
 
@@ -1036,6 +1036,7 @@ Configuration should be small enough to understand and explicit enough to be saf
 - BGP disabled by default.
 - Dashboard bound to localhost by default.
 - Simulation rather than action when BGP is off.
+- Stateless protection by default; stateful TCP tracking is opt-in because sampled sFlow often misses handshakes.
 - Conservative tuning: a high threshold and a persistence window longer than one evaluation.
 - Short mitigation duration.
 - No trusted sources unless the operator adds them.

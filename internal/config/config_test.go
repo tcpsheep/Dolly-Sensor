@@ -33,8 +33,8 @@ func TestSafeDefaultsRequireExplicitProtectedNetworks(t *testing.T) {
 	if cfg.Mitigation.AutoBlock {
 		t.Fatal("automatic blocking must be opt-in")
 	}
-	if !cfg.Detection.Stateful {
-		t.Fatal("TCP state tracking should be enabled by default")
+	if cfg.Detection.Stateful {
+		t.Fatal("TCP state tracking must be opt-in")
 	}
 	if cfg.Detection.Threshold != DefaultThreatThreshold {
 		t.Fatalf("default threshold = %v", cfg.Detection.Threshold)
@@ -75,8 +75,8 @@ func TestLoadValidConfiguration(t *testing.T) {
 	if loaded.Detection.Threshold != DefaultThreatThreshold || loaded.Detection.Persistence != DefaultPersistence {
 		t.Fatalf("defaults were not retained: threshold %v persistence %d", loaded.Detection.Threshold, loaded.Detection.Persistence)
 	}
-	if !loaded.Detection.Stateful {
-		t.Fatal("stateful detection default was not retained")
+	if loaded.Detection.Stateful {
+		t.Fatal("stateless detection default was not retained")
 	}
 	if loaded.BGP.Enabled {
 		t.Fatal("BGP unexpectedly enabled")
@@ -87,7 +87,6 @@ func TestDetectionTuningIsExplicitAndRoundTrips(t *testing.T) {
 	cfg := Default()
 	cfg.ProtectedCIDRs = []string{"203.0.113.0/24"}
 	cfg.Mitigation.BlocklistDir = t.TempDir()
-	cfg.Detection.Stateful = false
 	cfg.Detection.Threshold = 55
 	cfg.Detection.Persistence = 3
 	cfg.Detection.PPSFloor = 2500
@@ -106,14 +105,25 @@ func TestDetectionTuningIsExplicitAndRoundTrips(t *testing.T) {
 	if loaded.Detection.PPSFloor != 2500 || loaded.Detection.BPSFloor != 25_000_000 {
 		t.Fatalf("floors = %v/%v", loaded.Detection.PPSFloor, loaded.Detection.BPSFloor)
 	}
-	found := false
 	for _, warning := range warnings {
 		if strings.Contains(warning, "stateful") {
-			found = true
+			t.Fatalf("stateless default should not warn: %v", warnings)
 		}
 	}
-	if !found {
-		t.Fatalf("missing stateless warning: %v", warnings)
+}
+
+func TestStatefulProtectionIsOptInAndRoundTrips(t *testing.T) {
+	cfg := Default()
+	cfg.ProtectedCIDRs = []string{"203.0.113.0/24"}
+	cfg.Mitigation.BlocklistDir = t.TempDir()
+	cfg.Detection.Stateful = true
+	path := writeConfig(t, cfg)
+	loaded, warnings, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v (warnings: %v)", err, warnings)
+	}
+	if !loaded.Detection.Stateful {
+		t.Fatal("explicit stateful detection was not retained")
 	}
 }
 
