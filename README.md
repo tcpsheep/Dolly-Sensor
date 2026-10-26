@@ -1,3 +1,18 @@
+<div align="center">
+
+<svg width="120" height="72" viewBox="0 0 120 72" xmlns="http://www.w3.org/2000/svg" role="img" alt="Dolly Sensor logo">
+  <rect width="120" height="72" rx="10" fill="#1e1e1e"/>
+  <text x="60" y="32" font-family="monospace" font-size="13" fill="#43989d" text-anchor="middle">▶ DOLLY</text>
+  <text x="60" y="52" font-family="monospace" font-size="10" fill="#cccccc" text-anchor="middle" opacity="0.85">sFlow DDoS · BGP · rules</text>
+</svg>
+
+![Status: Active](https://img.shields.io/badge/status-active-2ecc71?style=for-the-badge&labelColor=1e1e1e)
+![Go](https://img.shields.io/badge/Go-1.23%2B-00ad91?style=for-the-badge&logo=go)
+![License: MIT](https://img.shields.io/badge/License-MIT-2ecc71?style=for-the-badge)
+![sFlow](https://img.shields.io/badge/sFlow-DDoS-43989d?style=for-the-badge)
+
+</div>
+
 # Dolly Sensor
 
 > **Postdata:** Dont ripoff this and call it as yours, specially you neoprotect, this is done so kids can learn how propper protection is done
