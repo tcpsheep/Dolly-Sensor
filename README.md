@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/logo.svg" alt="Dolly Sensor — sFlow DDoS detection and BGP Flowspec/RTBH mitigation controller" width="220">
+<img src="docs/logo.png" alt="Dolly Sensor — sFlow DDoS detection and BGP Flowspec/RTBH mitigation controller" width="440">
 
 [![Latest release](https://img.shields.io/github/v/release/tcpsheep/Dolly-Sensor?style=for-the-badge&labelColor=1e1e1e&color=43989d)](https://github.com/tcpsheep/Dolly-Sensor/releases/latest)
 ![Go](https://img.shields.io/badge/Go-1.23%2B-00ad91?style=for-the-badge&logo=go)
