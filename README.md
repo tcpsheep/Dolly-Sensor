@@ -3,6 +3,7 @@
 <img src="docs/logo.png" alt="Dolly Sensor — sFlow DDoS detection and BGP Flowspec/RTBH mitigation controller" width="440">
 
 [![Latest release](https://img.shields.io/github/v/release/tcpsheep/Dolly-Sensor?style=for-the-badge&labelColor=1e1e1e&color=43989d)](https://github.com/tcpsheep/Dolly-Sensor/releases/latest)
+[![CI](https://github.com/tcpsheep/Dolly-Sensor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tcpsheep/Dolly-Sensor/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.23%2B-00ad91?style=for-the-badge&logo=go)
 ![BGP](https://img.shields.io/badge/BGP-Flowspec%20%2B%20RTBH-43989d?style=for-the-badge)
 ![sFlow](https://img.shields.io/badge/sFlow-DDoS-43989d?style=for-the-badge)
