@@ -7,6 +7,8 @@ node_modules/
 # built binaries at the repository root only (not the cmd/ source directories)
 /dollysensor
 /sflowgen
+# test suites are kept locally, not published in the repository
+*_test.go
 *.o
 .DS_Store
 Thumbs.db

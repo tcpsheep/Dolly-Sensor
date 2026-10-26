@@ -33,8 +33,17 @@ const (
 	ActionDiscard   = "discard"
 	ActionRateLimit = "rate-limit"
 
-	ScopeRule = "rule"
-	ScopeFlow = "flow"
+	ScopeRule   = "rule"
+	ScopeFlow   = "flow"
+	ScopeSource = "source"
+
+	// DestinationWildcard is the special destination value that makes a rule
+	// apply to every protected prefix. Only conditional rules may use it,
+	// because a wildcard has no concrete prefix to announce: enforcement must
+	// be flow- or source-scoped, where the destination comes from the
+	// triggering observation. Rule packs use it so one definition covers any
+	// protected destination.
+	DestinationWildcard = "@protected"
 
 	PayloadNone     = "none"
 	PayloadContains = "contains"
@@ -53,8 +62,9 @@ const (
 	DirectionInbound  = "inbound"
 	DirectionInternal = "internal"
 
-	maxPatternBytes = 256
-	maxOffsetBytes  = 512
+	maxPatternBytes   = 256
+	maxOffsetBytes    = 512
+	maxPackNameLength = 60
 )
 
 var (
@@ -72,6 +82,7 @@ type Rule struct {
 	Description string    `json:"description,omitempty"`
 	Enabled     bool      `json:"enabled"`
 	Mode        string    `json:"mode"`
+	Pack        string    `json:"pack,omitempty"`
 	Match       Match     `json:"match"`
 	Condition   Condition `json:"condition"`
 	Action      Action    `json:"action"`
@@ -83,29 +94,37 @@ type Rule struct {
 }
 
 // Match selects the traffic a rule evaluates and the Flowspec header fields
-// Dolly can enforce. Destination is required. Source is optional for
+// Dolly can enforce. Destination is required: either a concrete prefix inside
+// the protected network, or the wildcard "@protected" (conditional rules
+// only), which matches any protected destination. Source is optional for
 // rate-limit rules and for flow-scoped payload rules; discard rules need an
 // explicit source unless the operator opted into destination-only discards.
 //
-// Port and packet-length fields support either an exact value or an inclusive
-// min/max range; setting both an exact value and a range on the same field is
-// rejected. Ranges are enforced with Flowspec GE/LE comparison operators.
+// Port, packet-length, and payload-length fields support either an exact
+// value or an inclusive min/max range; setting both an exact value and a
+// range on the same field is rejected. Port and packet-length ranges are
+// enforced with Flowspec GE/LE comparison operators; payload length is
+// evaluated on the sampled stream only (routers cannot match payload
+// lengths), so it behaves like a payload condition.
 type Match struct {
-	Destination     string `json:"destination"`
-	Source          string `json:"source,omitempty"`
-	Protocol        uint8  `json:"protocol,omitempty"`
-	SrcPort         uint16 `json:"src_port,omitempty"`
-	DstPort         uint16 `json:"dst_port,omitempty"`
-	SrcPortMin      uint16 `json:"src_port_min,omitempty"`
-	SrcPortMax      uint16 `json:"src_port_max,omitempty"`
-	DstPortMin      uint16 `json:"dst_port_min,omitempty"`
-	DstPortMax      uint16 `json:"dst_port_max,omitempty"`
-	TCPFlags        uint16 `json:"tcp_flags,omitempty"`
-	PacketLength    uint16 `json:"packet_length,omitempty"`
-	PacketLengthMin uint16 `json:"packet_length_min,omitempty"`
-	PacketLengthMax uint16 `json:"packet_length_max,omitempty"`
-	Fragment        bool   `json:"fragment,omitempty"`
-	Direction       string `json:"direction,omitempty"`
+	Destination        string `json:"destination"`
+	Source             string `json:"source,omitempty"`
+	Protocol           uint8  `json:"protocol,omitempty"`
+	SrcPort            uint16 `json:"src_port,omitempty"`
+	DstPort            uint16 `json:"dst_port,omitempty"`
+	SrcPortMin         uint16 `json:"src_port_min,omitempty"`
+	SrcPortMax         uint16 `json:"src_port_max,omitempty"`
+	DstPortMin         uint16 `json:"dst_port_min,omitempty"`
+	DstPortMax         uint16 `json:"dst_port_max,omitempty"`
+	TCPFlags           uint16 `json:"tcp_flags,omitempty"`
+	PacketLength       uint16 `json:"packet_length,omitempty"`
+	PacketLengthMin    uint16 `json:"packet_length_min,omitempty"`
+	PacketLengthMax    uint16 `json:"packet_length_max,omitempty"`
+	PayloadLength      uint16 `json:"payload_length,omitempty"`
+	PayloadLengthMin   uint16 `json:"payload_length_min,omitempty"`
+	PayloadLengthMax   uint16 `json:"payload_length_max,omitempty"`
+	Fragment           bool   `json:"fragment,omitempty"`
+	Direction          string `json:"direction,omitempty"`
 }
 
 // normalizeRange canonicalizes an inclusive range: a single bound implies the
@@ -128,6 +147,14 @@ func normalizeRange(minValue, maxValue uint16, impliedMax uint16) (uint16, uint1
 // inspect up to the captured payload limit (512 bytes) of sampled packets.
 // MinSources requires distinct sampled source addresses inside the window; it
 // is a distributed-attack guard and is bounded by sampling.
+//
+// PerSource evaluates the volume thresholds per source address instead of
+// across all matching traffic: it answers "is any single source exceeding
+// this?" rather than "is the aggregate exceeding this?". Each tracked source
+// has its own window, persistence counter, and cooldown, so one abusive
+// client can be mitigated precisely while the rest of the service keeps
+// working. Per-source rules enforce with the "source" scope by default: the
+// rule's header match pinned to the triggering source address.
 type Condition struct {
 	WindowSeconds   int              `json:"window_seconds,omitempty"`
 	MinPPS          float64          `json:"min_pps,omitempty"`
@@ -135,6 +162,7 @@ type Condition struct {
 	MinPackets      uint64           `json:"min_packets,omitempty"`
 	MinBytes        uint64           `json:"min_bytes,omitempty"`
 	MinSources      int              `json:"min_sources,omitempty"`
+	PerSource       bool             `json:"per_source,omitempty"`
 	Consecutive     int              `json:"consecutive,omitempty"`
 	CooldownSeconds int              `json:"cooldown_seconds,omitempty"`
 	Payload         PayloadCondition `json:"payload"`
@@ -154,8 +182,9 @@ type PayloadCondition struct {
 
 // Action describes the enforcement. Allow is a local bypass of Dolly's
 // automatic mitigation, not a BGP permit. Flow scope narrows a conditional
-// trigger to the exact observed conversation; rule scope announces the rule's
-// header match.
+// trigger to the exact observed conversation; source scope announces the
+// rule's header match pinned to the triggering source address (the default
+// for per-source rules); rule scope announces the rule's header match.
 type Action struct {
 	Type            string `json:"type"`
 	RateLimitBPS    uint64 `json:"rate_limit_bps,omitempty"`
@@ -233,6 +262,8 @@ type compiledRule struct {
 	destination netip.Prefix
 	source      netip.Prefix
 	hasSource   bool
+	wildcard    bool
+	protected   *netutil.PrefixSet
 	payload     *compiledPayload
 }
 
@@ -266,6 +297,7 @@ func normalizeAndValidate(rule *Rule, opts Options) error {
 	rule.Name = strings.TrimSpace(rule.Name)
 	rule.Description = strings.TrimSpace(rule.Description)
 	rule.Mode = strings.ToLower(strings.TrimSpace(rule.Mode))
+	rule.Pack = strings.TrimSpace(rule.Pack)
 	rule.Match.Direction = strings.ToLower(strings.TrimSpace(rule.Match.Direction))
 	rule.Action.Type = strings.ToLower(strings.TrimSpace(rule.Action.Type))
 	rule.Action.Scope = strings.ToLower(strings.TrimSpace(rule.Action.Scope))
@@ -282,6 +314,9 @@ func normalizeAndValidate(rule *Rule, opts Options) error {
 	if len(rule.Description) > 1000 {
 		return fmt.Errorf("%w: description must be 1000 characters or fewer", ErrInvalid)
 	}
+	if len(rule.Pack) > maxPackNameLength {
+		return fmt.Errorf("%w: pack name must be %d characters or fewer", ErrInvalid, maxPackNameLength)
+	}
 	switch rule.Mode {
 	case ModeStanding, ModeConditional:
 	default:
@@ -291,25 +326,36 @@ func normalizeAndValidate(rule *Rule, opts Options) error {
 	if opts.Protected == nil || opts.Protected.Len() == 0 {
 		return fmt.Errorf("%w: no protected prefixes configured", ErrInvalid)
 	}
-	dst, err := parsePolicyPrefix(rule.Match.Destination)
-	if err != nil {
-		return fmt.Errorf("%w: destination: %v", ErrInvalid, err)
+	wildcard := strings.TrimSpace(rule.Match.Destination) == DestinationWildcard
+	var dst netip.Prefix
+	if wildcard {
+		if rule.Mode != ModeConditional {
+			return fmt.Errorf("%w: destination %s is only valid for conditional rules: a wildcard has no concrete prefix to announce", ErrInvalid, DestinationWildcard)
+		}
+		rule.Match.Destination = DestinationWildcard
+	} else {
+		var err error
+		dst, err = parsePolicyPrefix(rule.Match.Destination)
+		if err != nil {
+			return fmt.Errorf("%w: destination: %v", ErrInvalid, err)
+		}
+		if dst.Bits() == 0 {
+			return fmt.Errorf("%w: destination must not be a default route", ErrInvalid)
+		}
+		if !opts.Protected.ContainsPrefix(dst) {
+			return fmt.Errorf("%w: destination %s is not fully inside the protected network", ErrInvalid, dst)
+		}
+		rule.Match.Destination = dst.String()
 	}
-	if dst.Bits() == 0 {
-		return fmt.Errorf("%w: destination must not be a default route", ErrInvalid)
-	}
-	if !opts.Protected.ContainsPrefix(dst) {
-		return fmt.Errorf("%w: destination %s is not fully inside the protected network", ErrInvalid, dst)
-	}
-	rule.Match.Destination = dst.String()
 
 	var src netip.Prefix
 	hasSource := strings.TrimSpace(rule.Match.Source) != ""
 	if hasSource {
-		src, err = parsePolicyPrefix(rule.Match.Source)
+		parsed, err := parsePolicyPrefix(rule.Match.Source)
 		if err != nil {
 			return fmt.Errorf("%w: source: %v", ErrInvalid, err)
 		}
+		src = parsed
 		if src.Bits() == 0 {
 			return fmt.Errorf("%w: source must not be a default route", ErrInvalid)
 		}
@@ -336,6 +382,7 @@ func normalizeAndValidate(rule *Rule, opts Options) error {
 	rule.Match.SrcPortMin, rule.Match.SrcPortMax = normalizeRange(rule.Match.SrcPortMin, rule.Match.SrcPortMax, 65535)
 	rule.Match.DstPortMin, rule.Match.DstPortMax = normalizeRange(rule.Match.DstPortMin, rule.Match.DstPortMax, 65535)
 	rule.Match.PacketLengthMin, rule.Match.PacketLengthMax = normalizeRange(rule.Match.PacketLengthMin, rule.Match.PacketLengthMax, 65535)
+	rule.Match.PayloadLengthMin, rule.Match.PayloadLengthMax = normalizeRange(rule.Match.PayloadLengthMin, rule.Match.PayloadLengthMax, 65535)
 	if rule.Match.SrcPort != 0 && rule.Match.SrcPortMin != 0 {
 		return fmt.Errorf("%w: source port cannot be both an exact value and a range", ErrInvalid)
 	}
@@ -344,6 +391,9 @@ func normalizeAndValidate(rule *Rule, opts Options) error {
 	}
 	if rule.Match.PacketLength != 0 && rule.Match.PacketLengthMin != 0 {
 		return fmt.Errorf("%w: packet length cannot be both an exact value and a range", ErrInvalid)
+	}
+	if rule.Match.PayloadLength != 0 && rule.Match.PayloadLengthMin != 0 {
+		return fmt.Errorf("%w: payload length cannot be both an exact value and a range", ErrInvalid)
 	}
 	portFields := [][2]uint16{
 		{rule.Match.SrcPortMin, rule.Match.SrcPortMax},
@@ -381,17 +431,26 @@ func normalizeAndValidate(rule *Rule, opts Options) error {
 
 	switch rule.Action.Scope {
 	case "":
-		if rule.Mode == ModeConditional && rule.Condition.Payload.Mode != PayloadNone {
+		switch {
+		case rule.Mode == ModeConditional && rule.Condition.PerSource:
+			rule.Action.Scope = ScopeSource
+		case rule.Mode == ModeConditional && rule.Condition.Payload.Mode != PayloadNone:
 			rule.Action.Scope = ScopeFlow
-		} else {
+		default:
 			rule.Action.Scope = ScopeRule
 		}
-	case ScopeRule, ScopeFlow:
+	case ScopeRule, ScopeFlow, ScopeSource:
 	default:
-		return fmt.Errorf("%w: enforcement scope must be rule or flow", ErrInvalid)
+		return fmt.Errorf("%w: enforcement scope must be rule, flow, or source", ErrInvalid)
 	}
 	if rule.Mode == ModeStanding && rule.Action.Scope != ScopeRule {
 		return fmt.Errorf("%w: standing rules can only enforce their rule header", ErrInvalid)
+	}
+	if rule.Action.Scope == ScopeSource && rule.Mode != ModeConditional {
+		return fmt.Errorf("%w: source-scoped enforcement is only available for conditional rules; the source address comes from the triggering observation", ErrInvalid)
+	}
+	if wildcard && rule.Action.Scope == ScopeRule {
+		return fmt.Errorf("%w: destination %s has no concrete prefix to announce; use flow or source enforcement scope", ErrInvalid, DestinationWildcard)
 	}
 	if rule.Action.Type == ActionAllow {
 		if rule.Mode != ModeStanding {
@@ -401,8 +460,8 @@ func normalizeAndValidate(rule *Rule, opts Options) error {
 			return fmt.Errorf("%w: allow/bypass rules cannot carry an enforcement scope, duration, or rate", ErrInvalid)
 		}
 	}
-	if rule.Action.Type == ActionDiscard && !hasSource && rule.Action.Scope != ScopeFlow && !opts.AllowDestinationDiscard {
-		return fmt.Errorf("%w: a rule-scoped discard needs a source prefix; set rules.allow_destination_discard only if you intend to discard all traffic to the destination", ErrInvalid)
+	if rule.Action.Type == ActionDiscard && !hasSource && rule.Action.Scope != ScopeFlow && rule.Action.Scope != ScopeSource && !opts.AllowDestinationDiscard {
+		return fmt.Errorf("%w: a rule-scoped discard needs a source prefix; use flow or source scope, or set rules.allow_destination_discard only if you intend to discard all traffic to the destination", ErrInvalid)
 	}
 
 	if err := normalizeCondition(rule); err != nil {
@@ -411,15 +470,22 @@ func normalizeAndValidate(rule *Rule, opts Options) error {
 	if rule.Mode == ModeStanding {
 		if rule.Condition.Payload.Mode != PayloadNone ||
 			rule.Condition.MinPPS != 0 || rule.Condition.MinBPS != 0 ||
-			rule.Condition.MinPackets != 0 || rule.Condition.MinBytes != 0 {
-			return fmt.Errorf("%w: standing rules cannot carry rate or payload conditions; use conditional mode", ErrInvalid)
+			rule.Condition.MinPackets != 0 || rule.Condition.MinBytes != 0 ||
+			rule.Condition.MinSources != 0 || rule.Condition.PerSource {
+			return fmt.Errorf("%w: standing rules cannot carry rate, per-source, or payload conditions; use conditional mode", ErrInvalid)
 		}
 		rule.Condition.WindowSeconds = 0
 		rule.Condition.Consecutive = 0
 		rule.Condition.CooldownSeconds = 0
 	}
 
-	compiled := &compiledRule{destination: dst, source: src, hasSource: hasSource}
+	compiled := &compiledRule{
+		destination: dst,
+		source:      src,
+		hasSource:   hasSource,
+		wildcard:    wildcard,
+		protected:   opts.Protected,
+	}
 	payload, err := compilePayload(rule.Condition.Payload)
 	if err != nil {
 		return err
@@ -519,6 +585,22 @@ func normalizeCondition(rule *Rule) error {
 		if cond.MinSources > 0 && strings.TrimSpace(rule.Match.Source) != "" {
 			return fmt.Errorf("%w: min_sources counts distinct sources, so the rule header must not pin a single source prefix", ErrInvalid)
 		}
+		if cond.PerSource {
+			perSourceRate := cond.MinPPS > 0 || cond.MinBPS > 0 || cond.MinPackets > 0 || cond.MinBytes > 0
+			if !perSourceRate {
+				return fmt.Errorf("%w: per_source needs at least one volume threshold (min_pps, min_bps, min_packets, or min_bytes)", ErrInvalid)
+			}
+			if cond.MinSources > 0 {
+				return fmt.Errorf("%w: per_source and min_sources are contradictory: per_source judges each source individually while min_sources counts them", ErrInvalid)
+			}
+			if strings.TrimSpace(rule.Match.Source) != "" {
+				return fmt.Errorf("%w: per_source judges each source separately, so the rule header must not pin a source prefix", ErrInvalid)
+			}
+			switch payload.Mode {
+			case PayloadAbsentN, PayloadPresentN:
+				return fmt.Errorf("%w: per_source cannot be combined with first-N payload conditions, which are per-conversation", ErrInvalid)
+			}
+		}
 	}
 	if rule.Action.Type == ActionAllow && payload.Mode != PayloadNone {
 		return fmt.Errorf("%w: allow/bypass rules cannot be conditional on payload", ErrInvalid)
@@ -590,7 +672,13 @@ func (m Match) matches(obs model.Observation, compiled *compiledRule) bool {
 	if compiled == nil {
 		return false
 	}
-	if !compiled.destination.Contains(obs.DstIP.Unmap()) {
+	if compiled.wildcard {
+		// A wildcard rule applies to any address inside the protected
+		// network; the traffic still has to be inbound toward it.
+		if compiled.protected == nil || !compiled.protected.Contains(obs.DstIP.Unmap()) {
+			return false
+		}
+	} else if !compiled.destination.Contains(obs.DstIP.Unmap()) {
 		return false
 	}
 	if compiled.hasSource && !compiled.source.Contains(obs.SrcIP.Unmap()) {
@@ -612,6 +700,11 @@ func (m Match) matches(obs model.Observation, compiled *compiledRule) bool {
 		return false
 	}
 	if !matchU16(m.PacketLength, m.PacketLengthMin, m.PacketLengthMax, obs.PacketSize) {
+		return false
+	}
+	// Payload length is a sampled-stream condition: it inspects the captured
+	// payload of the observation, which may be truncated by the sampler.
+	if !matchU16(m.PayloadLength, m.PayloadLengthMin, m.PayloadLengthMax, uint16(len(obs.Payload))) {
 		return false
 	}
 	if m.Fragment && !obs.Fragmented {

@@ -90,15 +90,6 @@ func (s *Server) handlePacket(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, obs)
 }
 
-func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
-	limit, err := queryLimit(r, 500, 2000)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, s.sensor.Connections(limit))
-}
-
 func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	limit, err := queryLimit(r, 200, 1000)
 	if err != nil {
@@ -392,11 +383,47 @@ func writeRuleError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, rules.ErrInvalid):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, rules.ErrInvalidPack):
+		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, rules.ErrDisabled):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
+}
+
+func (s *Server) handleImportPackByName(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	result, err := s.sensor.ImportPackByName(ctx, name)
+	if err != nil {
+		writeRuleError(w, err)
+		return
+	}
+	s.logger.Info("rule pack imported", "pack", name, "imported", len(result.Imported), "skipped", len(result.Skipped))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "pack": name, "result": result})
+}
+
+func (s *Server) handleImportPack(w http.ResponseWriter, r *http.Request) {
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "reading pack: "+err.Error())
+		return
+	}
+	if len(data) == 0 {
+		writeError(w, http.StatusBadRequest, "request body must contain a .dly rule pack document")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	result, err := s.sensor.ImportPackData(ctx, data)
+	if err != nil {
+		writeRuleError(w, err)
+		return
+	}
+	s.logger.Info("rule pack imported", "imported", len(result.Imported), "skipped", len(result.Skipped))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result})
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {

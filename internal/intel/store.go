@@ -25,9 +25,6 @@ const (
 	initialTrustCredit = 3.0
 	activeDayCredit    = 1.0
 	activeDayCreditMax = 20.0
-	handshakeCredit    = 2.0
-	handshakeDailyMax  = 6.0
-	longSessionCredit  = 3.0
 	earnedTrustCeiling = 95.0
 	decayPerDay        = 2.0
 	defaultForgetAfter = 30 * 24 * time.Hour
@@ -67,6 +64,8 @@ type TrustEvent struct {
 }
 
 // Reputation is the durable behaviour of one source toward one destination.
+// Detection is stateless: trust is earned from sampled traffic shapes (active
+// days, ACK/PSH milestones) rather than from reconstructed connections.
 type Reputation struct {
 	Source           string            `json:"source"`
 	FirstSeen        time.Time         `json:"first_seen"`
@@ -80,16 +79,11 @@ type Reputation struct {
 	PSH              uint64            `json:"psh"`
 	RST              uint64            `json:"rst"`
 	FIN              uint64            `json:"fin"`
-	Handshakes       uint64            `json:"handshakes"`
 	Earned           float64           `json:"earned"`
 	Manual           bool              `json:"manual"`
 	History          []TrustEvent      `json:"history,omitempty"`
 	Milestones       map[string]bool   `json:"milestones,omitempty"`
 	LastDecayDay     string            `json:"last_decay_day,omitempty"`
-	HandshakeDay     string            `json:"handshake_credit_day,omitempty"`
-	HandshakeCredits float64           `json:"handshake_credits,omitempty"`
-	Long15           bool              `json:"long_15,omitempty"`
-	Long30           bool              `json:"long_30,omitempty"`
 	UpdatedAt        time.Time         `json:"updated_at"`
 }
 
@@ -490,61 +484,6 @@ func thresholdFromKey(key string) uint64 {
 	}
 }
 
-// CreditHandshake applies one handshake credit. Handshakes are hard to fake at
-// scale, which is why they matter, but the credit is rate-limited per day so it
-// cannot be farmed instantly.
-func (s *Store) CreditHandshake(dst, src netip.Addr, at time.Time) {
-	if !dst.IsValid() || !src.IsValid() {
-		return
-	}
-	if at.IsZero() {
-		at = time.Now()
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rep := s.ensureReputationLocked(dst, src, at)
-	if rep == nil {
-		return
-	}
-	rep.Handshakes++
-	today := dayString(at)
-	if rep.HandshakeDay != today {
-		rep.HandshakeDay = today
-		rep.HandshakeCredits = 0
-	}
-	if rep.HandshakeCredits+handshakeCredit <= handshakeDailyMax {
-		rep.HandshakeCredits += handshakeCredit
-		s.creditLocked(rep, at, handshakeCredit, "completed a TCP handshake")
-	}
-	s.dirty = true
-}
-
-// CreditLongSession records a long-lived established session.
-func (s *Store) CreditLongSession(dst, src netip.Addr, at time.Time, duration time.Duration) {
-	if !dst.IsValid() || !src.IsValid() {
-		return
-	}
-	if at.IsZero() {
-		at = time.Now()
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rep := s.ensureReputationLocked(dst, src, at)
-	if rep == nil || rep.Manual {
-		return
-	}
-	switch {
-	case duration >= 30*time.Minute && !rep.Long30:
-		rep.Long30 = true
-		rep.Long15 = true
-		s.creditLocked(rep, at, longSessionCredit, "session lasted 30 minutes")
-	case duration >= 15*time.Minute && !rep.Long15:
-		rep.Long15 = true
-		s.creditLocked(rep, at, longSessionCredit, "session lasted 15 minutes")
-	}
-	s.dirty = true
-}
-
 func (s *Store) ensureReputationLocked(dst, src netip.Addr, at time.Time) *Reputation {
 	if !dst.IsValid() || !src.IsValid() {
 		return nil
@@ -720,9 +659,9 @@ func (s *Store) TrustScore(dst, src netip.Addr) float64 {
 }
 
 // SourceSummary returns the sampled counters used by detection.
-func (s *Store) SourceSummary(dst, src netip.Addr) (syn, ack, handshakes uint64, trust float64, manual bool) {
+func (s *Store) SourceSummary(dst, src netip.Addr) (syn, ack uint64, trust float64, manual bool) {
 	if !dst.IsValid() || !src.IsValid() {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -734,7 +673,7 @@ func (s *Store) SourceSummary(dst, src netip.Addr) (syn, ack, handshakes uint64,
 	if rep == nil {
 		return
 	}
-	return rep.SYN, rep.ACK, rep.Handshakes, rep.Trust(), rep.Manual
+	return rep.SYN, rep.ACK, rep.Trust(), rep.Manual
 }
 
 func increment[K comparable](m map[K]uint64, key K, max int) {

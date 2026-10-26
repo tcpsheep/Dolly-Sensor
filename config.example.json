@@ -13,13 +13,11 @@
   ],
   "trusted_sources": [],
   "detection": {
-    "stateful": false,
     "evaluation_interval": "1s",
     "rate_window_seconds": 5,
     "cooldown": "10m",
     "warmup_windows": 30,
     "trust_exemption_score": 70,
-    "out_of_state_min_pps": 100,
     "threshold": 70,
     "persistence": 5,
     "pps_floor": 10000,
@@ -42,16 +40,6 @@
     "max_flows_per_rule": 8192,
     "evaluation_queue": 4096,
     "allow_destination_discard": false
-  },
-  "protocols": {
-    "ftp": {
-      "enabled": true,
-      "control_rate_limit_pps": 50,
-      "data_rate_limit_pps": 500,
-      "exempt_trust_score": 70,
-      "max_command_bytes": 512,
-      "block_duration": "1m"
-    }
   },
   "bgp": {
     "enabled": false,
@@ -81,11 +69,7 @@
     "alert_history": 500,
     "destination_stats_ttl": "10m",
     "baseline_ttl": "30m",
-    "tcp_session_ttl": "5m",
-    "tcp_pending_ttl": "10s",
-    "max_tcp_sessions": 100000,
     "max_profiles": 10000,
-    "trust_decay_interval": "15m",
-    "ftp_state_ttl": "5m"
+    "trust_decay_interval": "15m"
   }
 }

@@ -36,9 +36,9 @@ the UI. A second binary generates synthetic sFlow for lab use.
 |---|---|
 | **Category** | Out-of-band, flow-based DDoS detection and mitigation |
 | **Telemetry** | sFlow v5 over UDP |
-| **Detection** | Blocklists, optional stateful TCP tracking, FTP abuse, source reputation, volumetric scoring, warm-up and trust |
+| **Detection** | Blocklists, SYN/ACK asymmetry, malformed-packet share, source reputation, volumetric scoring, warm-up and trust |
 | **Mitigation** | BGP Flowspec (RFC 8955/8956) and RTBH (RFC 3882), IPv4 |
-| **Policy** | Persistent rules engine: standing and conditional rules, dashboard editor, JSON API |
+| **Policy** | Persistent rules engine: standing and conditional rules, per-source conditions, loadable rule packs (`.dly`), dashboard editor, JSON API |
 | **Dependencies** | Go standard library only — no modules, no database, no JS toolchain |
 | **Runtime** | Single static binary with embedded dashboard (`dollysensor`), plus `sflowgen` for labs |
 | **License** | MIT |
@@ -98,10 +98,11 @@ in-kernel XDP drops, inline scrubbing, or multi-tenant management today.
 1. **Ingest** sFlow v5 datagrams over UDP, decode the sampled packets, and estimate
    real packet and byte counts from the sampling rate.
 2. **Profile** every protected destination and every external source — recent rates,
-   long-term baselines, protocol mix, TCP session behavior when stateful tracking is
-   enabled, and trust earned through completed handshakes and long-lived sessions.
-3. **Detect** attacks by layering deterministic checks (blocklists, optional
-   out-of-state TCP, FTP abuse), behavioral reputation, and statistical volume evidence
+   long-term baselines, protocol mix, sampled SYN/ACK balance, and trust earned
+   through plausible behavior.
+3. **Detect** attacks by layering deterministic checks (blocklists), behavioural
+   reputation (SYN/ACK asymmetry: a source that opened hundreds of handshakes but
+   answered a handful), statistical volume evidence, and malformed-packet share
    into a single explainable score.
 4. **Decide** with guardrails: only explicitly protected prefixes can ever be the
    target, default routes are refused, internal sources are never blocked, and every
@@ -124,14 +125,14 @@ The sensor never judges a packet in isolation; it judges it against what it has
 learned about the destination and the source.
 
 **Per destination** it maintains recent rate windows (packets, bytes, per-protocol and
-per-port splits), a long-term baseline used to compute deviation, top sources, session
-counts, and warm-up state. A brand-new destination starts in a *learning* phase with a
-capped score so the first few packets cannot trigger mitigation on their own.
+per-port splits), a long-term baseline used to compute deviation, top sources, sampled
+SYN/ACK mixes, and warm-up state. A brand-new destination starts in a *learning* phase
+with a capped score so the first few packets cannot trigger mitigation on their own.
 
-**Per source** it maintains reputation. Sources that complete TCP handshakes and hold
-long-lived sessions earn trust; sources that send SYNs which never complete handshakes
-lose it. Trust never hides traffic — it raises the evidence required to act against
-that source, and it decays over time so it must be re-earned.
+**Per source** it maintains reputation. Sources whose sampled traffic shows balanced
+SYN/ACK behaviour over time earn trust; sources that send SYNs which never draw a
+single sampled ACK lose it. Trust never hides traffic — it raises the evidence required
+to act against that source, and it decays over time so it must be re-earned.
 
 **Profiles survive restarts.** Destination profiles, source reputations, and manual
 trust decisions are persisted atomically, so a restart does not reset months of learned
@@ -155,7 +156,9 @@ The rules engine is the operator-facing half of the sensor. Automatic detection
 decides what *looks like* an attack; rules encode what *you know* about your network:
 which partners must never be blocked, which scanner ranges should be permanently
 rate-limited, which payload signatures are a page on your application, and how
-aggressive to be about distributed scans.
+aggressive to be about distributed scans. Application-specific knowledge — FTP
+today, SSH or HTTP tomorrow — does not live in the sensor's code: it ships as
+loadable [rule packs](#rule-packs-dly) built on the same generic conditions.
 
 Rules are persisted to a JSON file, written atomically, survive restarts, and are
 managed from the dashboard (create, edit, enable/disable, delete, preview, and
@@ -185,13 +188,14 @@ exactly what Flowspec announces:
 
 | Field | Exact | Range | Notes |
 |---|---|---|---|
-| Destination prefix | — | — | Required; must sit fully inside a protected CIDR |
+| Destination prefix | — | — | Required; a protected CIDR, or `@protected` for any protected prefix (conditional rules only) |
 | Source prefix | — | — | Optional; refused if it overlaps protected space |
 | Protocol | ✓ | — | 0 = any; ports and TCP flags require TCP/UDP |
 | Source port | ✓ | ✓ min–max | Exact and range are mutually exclusive |
 | Destination port | ✓ | ✓ min–max | Exact and range are mutually exclusive |
 | TCP flags | bitmask | — | All selected bits must be set; TCP only |
 | Packet length (bytes) | ✓ | ✓ min–max | e.g. 64–256 to match small-packet floods |
+| Payload length (bytes) | ✓ | ✓ min–max | Captured payload size of the sample; sampled-stream condition, not Flowspec-enforceable |
 | Fragmented only | ✓ | — | Matches fragmented packets only |
 | Direction | ✓ | — | any / inbound / internal |
 
@@ -211,6 +215,8 @@ Conditions are evaluated over a sliding window of sampled observations:
   the distributed-attack guard: a SYN flood from one host and a slow scan from five
   hundred hosts look nothing alike to it. It requires an empty source prefix in the
   match (a pinned source would make counting distinct sources meaningless).
+- **`per_source`** — judge the volume thresholds per source address instead of
+  across all matching traffic. See [per-source conditions](#per-source-conditions).
 - **`consecutive`** — how many windows in a row the threshold must hold before the
   rule fires (1–60). Raises confidence at the cost of reaction time.
 - **`cooldown_seconds`** — after firing, how long the rule stays quiet before it can
@@ -256,9 +262,68 @@ architecture.
   falling back to `mitigation.rate_limit_mbps` when unset.
 
 Each action carries a duration (temporary rules) and an enforcement scope: **rule**
-(the rule's own header match) or **flow** (narrowed to the specific observed
-conversation that triggered it). Volume conditions default to rule scope; payload
-conditions default to flow scope.
+(the rule's own header match), **flow** (narrowed to the specific observed
+conversation that triggered it), or **source** (the rule's header match pinned to
+the single source address that tripped the threshold). Volume conditions default
+to rule scope; payload conditions default to flow scope; per-source conditions
+default to source scope.
+
+### Per-source conditions
+
+Volume thresholds can be judged **per source address** (`condition.per_source`).
+Instead of asking "is traffic to this service above 50 pps in total?", a per-source
+rule asks "is any *single* source above 50 pps?". Each tracked source has its own
+window, persistence counter, and cooldown, so one abusive client is mitigated
+precisely while every other client of the same service keeps working — the
+"why would one IP send 700 SYNs and a few ACKs?" case. A per-source rule:
+
+- requires at least one volume threshold and an empty source prefix,
+- cannot be combined with `min_sources` or first-N payload conditions (they judge
+  conversations, not sources),
+- tracks at most 256 distinct sources per rule; beyond that it stops learning new
+  addresses until old ones expire (per-source rules target single abusive clients,
+  not distributed floods — `min_sources` is the distributed-attack guard).
+
+### Rule packs (`.dly`)
+
+Application-specific knowledge does not live in the sensor's code. It ships as
+**rule packs**: `.dly` JSON documents with a name, version, description, and a list
+of rules. Import a pack and its rules become ordinary catalog entries — edit,
+disable, reorder, or delete them like any hand-written rule. Re-importing the same
+pack skips rules that already exist, so the operation is idempotent.
+
+```json
+{
+  "name": "FTP abuse",
+  "version": 1,
+  "description": "…",
+  "rules": [
+    {
+      "name": "FTP control flood (single source)",
+      "enabled": true,
+      "mode": "conditional",
+      "match": { "destination": "@protected", "protocol": 6, "dst_port": 21, "direction": "inbound" },
+      "condition": { "window_seconds": 5, "per_source": true, "min_pps": 50, "consecutive": 2 },
+      "action": { "type": "rate-limit", "rate_limit_bps": 10000000, "duration_seconds": 300, "scope": "source" }
+    }
+  ]
+}
+```
+
+Packs use two conventions that make them destination-independent:
+
+- **`"destination": "@protected"`** — the wildcard that matches every protected
+  prefix. Only conditional rules may use it (a wildcard has no concrete prefix to
+  announce), and it requires flow or source enforcement scope, where the
+  destination is taken from the triggering observation.
+- **`"per_source": true`** — thresholds are judged per source, so one pack
+  definition covers any deployment size.
+
+A starter **FTP abuse** pack is embedded in the binary and importable from the
+dashboard's Rules view (one click) or the API. Writing an `ssh.dly` or `http.dly`
+for your own protocols is the intended path for new application coverage: the
+engine conditions (`per_source`, payload and payload-length matching, port and
+flag ranges) are deliberately protocol-agnostic.
 
 ### Guardrails
 
@@ -292,9 +357,11 @@ Everything the dashboard does is a JSON API (mutations require the `X-Dolly-Requ
 header):
 
 ```
-GET    /api/rules                 catalog, summary, limits, persistence state
+GET    /api/rules                 catalog, summary, limits, packs, persistence state
 POST   /api/rules                 create (body: full rule)
 POST   /api/rules/preview         evaluate a draft against recent samples
+POST   /api/rules/packs           import a custom .dly pack (body: pack document)
+POST   /api/rules/packs/{name}/import   import a built-in pack by name
 PUT    /api/rules/order           set the full evaluation order (body: {order: [ids]})
 POST   /api/rules/{id}/move       move one rule to a zero-based position
 PUT    /api/rules/{id}            replace a rule
@@ -308,17 +375,13 @@ Rules sit beside automatic detection, not in front of it. The detection funnel i
 layered so that the cheapest, most certain checks run first:
 
 - **Blocklist** hits are deterministic and immediately critical.
-- **TCP state (optional)** distinguishes handshakes, established sessions, and
-  out-of-state traffic when `detection.stateful` is enabled; session state is updated
-  before a packet is judged, and server replies from a privileged port are not treated
-  as client abuse. Set it to `false` for stateless protection when sampled sFlow data
-  cannot reconstruct connections reliably.
-- **FTP** rules examine control/data direction, command size, and rate.
-- **Reputation** from the profiling layer penalizes SYN-heavy sources and rewards
-  completed handshakes and long sessions.
+- **Reputation** from the profiling layer penalizes sources whose sampled SYNs
+  starkly outnumber their sampled ACKs (≥10:1 — a source that opened hundreds of
+  handshakes but answered a handful) and rewards balanced SYN/ACK behaviour.
 - **Volumetric** scoring combines absolute floors, deviation from the destination's
-  baseline, tiny-packet share, protocol/SYN concentration, source concentration,
-  out-of-state rate, and trust into a single score.
+  baseline, tiny-packet share, protocol/SYN concentration, SYN:ACK asymmetry,
+  malformed-packet share (impossible TCP flag combinations, zero ports, stray
+  fragments), source concentration, and trust into a single score.
 - **Decision** suppresses internal-source actions, requires stronger evidence for
   trusted sources, respects cooldowns, and deduplicates equivalent actions.
 
@@ -326,7 +389,7 @@ An **allow rule overrides this entire pipeline for matching traffic** — that i
 purpose. A conditional rule supplements it with knowledge detection cannot infer.
 
 <p align="center">
-  <img src="docs/scoring.png" alt="Bar chart of the threat score composition for a real SYN flood: PPS floor 25 points, z-score deviation 22, 988x baseline 10, tiny packets 10, pure SYN 18, top source concentration 6, no-handshake 10, low trust 8, raw sum 118 capped at 100" width="980">
+  <img src="docs/scoring.png" alt="Bar chart of the threat score composition for a real SYN flood: PPS floor 25 points, z-score deviation 22, 988x baseline 10, tiny packets 10, pure SYN 18, top source concentration 6, no sampled ACK 10, low trust 8, raw sum 118 capped at 100" width="980">
 </p>
 <p align="center"><em>The volumetric score of the demo attack, exactly as every contributing rule fired.
 The raw sum is 118 and is deliberately capped at 100; the subject crossed the threshold
@@ -411,7 +474,6 @@ directly; there are no network-type or sensitivity presets to select.
 
 ```json
 "detection": {
-  "stateful": false,
   "threshold": 70,
   "persistence": 5,
   "pps_floor": 10000,
@@ -420,18 +482,15 @@ directly; there are no network-type or sensitivity presets to select.
   "rate_window_seconds": 5,
   "cooldown": "10m",
   "warmup_windows": 30,
-  "trust_exemption_score": 70,
-  "out_of_state_min_pps": 100
+  "trust_exemption_score": 70
 }
 ```
 
-- `stateful` — opt-in TCP session tracking. When `true`, the sensor tracks TCP
-  handshakes and sessions for out-of-state findings, handshake and long-session trust
-  credit, and the Connections view. The default is `false`: protection is stateless,
-  no connection table is maintained, and detection relies on sampled rates, protocol
-  and SYN mixes, reputation, blocklists, and application rules. Stateless is the
-  default because sampled sFlow often cannot reconstruct connections reliably; enable
-  stateful tracking only when the sampling ratio is dense enough to see handshakes.
+Detection is purely stateless: no connection table is maintained, and detection relies
+on sampled rates, protocol and SYN mixes, reputation, blocklists, and application
+rules. This is deliberate — sampled sFlow (especially when the sampling ratio is not
+1:1) often cannot reconstruct TCP connections reliably, so connection-derived evidence
+would be guesswork, not proof.
 - `threshold` — threat score (1–100) that starts the persistence counter.
 - `persistence` — consecutive evaluation windows the score must stay above the
   threshold before an attack is declared.
@@ -443,8 +502,6 @@ directly; there are no network-type or sensitivity presets to select.
 - `warmup_windows` — how long a new destination stays in the learning phase with a
   capped score.
 - `trust_exemption_score` — trust level above which a source gets additional patience.
-- `out_of_state_min_pps` — minimum out-of-state rate for TCP state evidence; ignored
-  when `stateful` is `false`.
 - `cooldown` — suppresses repeated alert attention, not evaluation and not an active
   mitigation.
 
@@ -532,10 +589,8 @@ secret. Profiles, reputations, and manual trust persist to
 
 Every retained structure is bounded: `memory.packet_buffer` and
 `memory.alert_history` cap the inspector and alert list; destination stats, baselines,
-TCP sessions, pending handshakes, FTP state, and trust decay all have TTLs and
-periodic cleanup; `max_tcp_sessions` and `max_profiles` cap the session and profile
-tables with oldest-first eviction. The TCP session limits are used only when
-`detection.stateful` is enabled.
+per-source rule windows, flow tables, and trust decay all have TTLs and periodic
+cleanup; `max_profiles` caps the profile table with oldest-first eviction.
 
 ## Dashboard
 
@@ -547,8 +602,6 @@ Served from the Go binary with no build step. Views:
   reputations, observations, alerts, profile, mitigations.
 - **Intelligence** — detection parameters, learned baselines, reputation, trust.
 - **Inspector** — bounded recent observations with filters and live prepend.
-- **Connections** — TCP state learned from samples when `detection.stateful` is on;
-  the view explains itself when protection is stateless.
 - **Blocklist** — entry counts, loaded files, manual additions, reload.
 - **Rules** — the full rules engine: catalog in evaluation order, editor, preview,
   drag-and-drop ordering, persistence state.
@@ -567,16 +620,21 @@ go test -race ./...
 go vet ./...
 ```
 
-Coverage includes detection scoring and warm-up, TCP state transitions and bounds,
-blocklist parsing/reload/safety, configuration validation, concurrent profile-store
-access and persistence, BGP wire encoding (including GE/LE range operators and the
-fragment component), peer Flowspec capability checks, hold-time enforcement,
-reconnect/replay and withdrawal ordering, mitigation deduplication and replacement,
-webhook delivery, rule validation and persistence, range/fragment/min-sources
-matching, evaluation-order reordering, standing-rule replay after restart,
-conditional triggering with flow-scoped enforcement, allow-rule suppression, and an
-end-to-end observation-to-simulated-Flowspec flow with shutdown withdrawal. No network
-access or external modules are required.
+The full suite covers detection scoring and warm-up, blocklist
+parsing/reload/safety, configuration validation, concurrent profile-store access and
+persistence, BGP wire encoding (including GE/LE range operators and the fragment
+component), peer Flowspec capability checks, hold-time enforcement, reconnect/replay
+and withdrawal ordering, mitigation deduplication and replacement, webhook delivery,
+rule validation and persistence, range/fragment/min-sources matching,
+evaluation-order reordering, standing-rule replay after restart, conditional
+triggering with flow-scoped enforcement, allow-rule suppression, and an end-to-end
+observation-to-simulated-Flowspec flow with shutdown withdrawal. No network access or
+external modules are required.
+
+Note: test files (`*_test.go`) are kept by each operator locally and are intentionally
+not published in this repository, so a fresh clone has no test files and `go test ./...`
+reports `[no test files]`. CI still builds, vets, and runs the (empty) test set on
+every push.
 
 ## FAQ
 
@@ -626,11 +684,12 @@ reset.
 
 ### How does it handle spoofed sources and false positives?
 
-Sources earn trust by completing TCP handshakes and holding sessions; SYN-only sources
-lose it. Trust raises the evidence required to act but never hides traffic. Internal
-sources are never blocked, allow rules override the whole pipeline, and every automatic
-action is temporary and deduplicated. During warm-up, a new destination has a capped
-score so its first packets cannot trigger mitigation alone.
+Sources earn trust through balanced sampled SYN/ACK behaviour over time; sources that
+send SYNs but never draw a single sampled ACK lose it. Trust raises the evidence
+required to act but never hides traffic. Internal sources are never blocked, allow
+rules override the whole pipeline, and every automatic action is temporary and
+deduplicated. During warm-up, a new destination has a capped score so its first
+packets cannot trigger mitigation alone.
 
 ### Is the dashboard safe to expose?
 
@@ -705,6 +764,5 @@ communities, webhook secrets, and crash-cleanup procedures.
 
 - Releases and prebuilt binaries: <https://github.com/tcpsheep/Dolly-Sensor/releases>
 - Operator tutorial: [OPERATOR-TUTORIAL.md](OPERATOR-TUTORIAL.md)
-- Design notes: [CONCEPT.md](CONCEPT.md)
 - Machine-readable summary: [llms.txt](llms.txt)
 - License: [MIT](LICENSE)

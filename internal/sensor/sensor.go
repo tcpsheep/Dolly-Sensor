@@ -30,7 +30,6 @@ import (
 	"dollysensor/internal/notify"
 	"dollysensor/internal/rules"
 	"dollysensor/internal/sflow"
-	"dollysensor/internal/tcpstate"
 	"dollysensor/internal/version"
 )
 
@@ -46,7 +45,6 @@ type runtimeCounters struct {
 	droppedFindings  atomic.Uint64
 	droppedRules     atomic.Uint64
 	blocklistHits    atomic.Uint64
-	ftpFindings      atomic.Uint64
 	evaluations      atomic.Uint64
 }
 
@@ -68,7 +66,6 @@ type Sensor struct {
 	blocklist *blocklist.List
 	intel     *intel.Store
 	aggregate *aggregate.Registry
-	tcp       *tcpstate.Tracker
 	detector  *detect.Detector
 	alerts    *alerts.Store
 	hub       *events.Hub
@@ -169,13 +166,6 @@ func New(cfg config.Config, loadedWarnings []string, logger *slog.Logger) (*Sens
 		findings:  make(chan detect.Finding, 2048),
 		gate:      newFindingGate(2 * time.Second),
 	}
-	if cfg.Detection.Stateful {
-		s.tcp = tcpstate.New(tcpstate.Options{
-			PendingTTL:  cfg.Memory.TCPPendingTTL.Std(),
-			SessionTTL:  cfg.Memory.TCPSessionTTL.Std(),
-			MaxSessions: cfg.Memory.MaxTCPSessions,
-		})
-	}
 	s.ruleObservations = make(chan model.Observation, cfg.Rules.EvaluationQueue)
 	s.notifier = notify.New(notify.Options{
 		URL:     cfg.Alerting.WebhookURL,
@@ -185,12 +175,10 @@ func New(cfg config.Config, loadedWarnings []string, logger *slog.Logger) (*Sens
 		Logger:  logger,
 	})
 	s.detector = detect.New(detect.Options{
-		Detection:   cfg.Detection,
-		FTP:         cfg.Protocols.FTP,
-		FTPStateTTL: cfg.Memory.FTPStateTTL.Std(),
-		Intel:       profiles,
-		Protected:   protected,
-		Trusted:     trusted,
+		Detection: cfg.Detection,
+		Intel:     profiles,
+		Protected: protected,
+		Trusted:   trusted,
 	})
 	s.ring = buffer.New(cfg.Memory.PacketBuffer)
 
@@ -441,23 +429,11 @@ func (s *Sensor) processObservation(obs model.Observation, now time.Time) {
 		}
 	}
 
-	var tcpEvents []tcpstate.Event
-	if s.tcp != nil && obs.DstProtected && obs.Protocol == 6 {
-		tcpEvents = s.tcp.Process(&obs)
-	}
 	obs.Finalize()
 
 	if obs.DstProtected {
 		s.intel.Observe(obs)
 		s.aggregate.Observe(obs, now)
-		for _, event := range tcpEvents {
-			switch event.Kind {
-			case tcpstate.EventHandshake:
-				s.intel.CreditHandshake(event.Destination, event.Source, event.At)
-			case tcpstate.EventLongSession:
-				s.intel.CreditLongSession(event.Destination, event.Source, event.At, event.Duration)
-			}
-		}
 	}
 	s.ring.Add(obs)
 	if obs.DstProtected && s.ruleStore != nil {
@@ -474,13 +450,6 @@ func (s *Sensor) processObservation(obs model.Observation, now time.Time) {
 		finding := blocklistFinding(obs, matched, s.cfg.Mitigation.AutoBlock)
 		if finding != nil {
 			s.enqueueFinding(*finding, now)
-		}
-	}
-	if obs.DstProtected && (obs.DstPort == 20 || obs.DstPort == 21) {
-		ftpFindings := s.detector.CheckFTP(&obs, now)
-		for _, finding := range ftpFindings {
-			s.counters.ftpFindings.Add(1)
-			s.enqueueFinding(finding, now)
 		}
 	}
 }

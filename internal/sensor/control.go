@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/netip"
 	"strings"
 	"time"
 
@@ -15,7 +14,6 @@ import (
 	"dollysensor/internal/model"
 	"dollysensor/internal/netutil"
 	"dollysensor/internal/notify"
-	"dollysensor/internal/tcpstate"
 )
 
 func (s *Sensor) evaluationLoop(ctx context.Context) {
@@ -41,11 +39,7 @@ func (s *Sensor) evaluationLoop(ctx context.Context) {
 func (s *Sensor) evaluateOnce(now time.Time) {
 	window := s.cfg.Detection.RateWindowSeconds
 	snapshots := s.aggregate.SnapshotAll(now, window)
-	var oos map[netip.Addr]tcpstate.OOSStat
-	if s.tcp != nil {
-		oos = s.tcp.OutOfStateStats(now, window)
-	}
-	results := s.detector.Evaluate(now, snapshots, oos)
+	results := s.detector.Evaluate(now, snapshots)
 	for _, result := range results {
 		dst, err := parseAddr(result.State.Destination)
 		if err != nil {
@@ -154,16 +148,6 @@ func (s *Sensor) maintenanceOnce(ctx context.Context, now time.Time) {
 	s.aggregate.Cleanup(now, s.cfg.Memory.DestinationStatsTTL.Std())
 	s.detector.Cleanup(now, s.cfg.Memory.BaselineTTL.Std())
 	s.gate.cleanup(now)
-	if s.tcp != nil {
-		for _, event := range s.tcp.Sweep(now) {
-			switch event.Kind {
-			case tcpEventHandshake:
-				s.intel.CreditHandshake(event.Destination, event.Source, event.At)
-			case tcpEventLongSession:
-				s.intel.CreditLongSession(event.Destination, event.Source, event.At, event.Duration)
-			}
-		}
-	}
 	s.publishMitigationChanges(ctx)
 	s.syncStandingRules(ctx)
 }
@@ -491,20 +475,12 @@ func alertTitle(alert alerts.Alert, candidate alerts.Candidate) string {
 	switch candidate.Type {
 	case "volumetric":
 		label = "Volumetric attack"
-	case "tcp_out_of_state":
-		label = "Out-of-state TCP flood"
+	case "syn_flood":
+		label = "Probable SYN flood"
 	case "blocklist":
 		label = "Blocklisted source"
 	case "rule_trigger":
 		label = "Operator rule triggered"
-	case "ftp_control", "ftp_data":
-		label = "FTP flood"
-	case "ftp_protocol":
-		label = "Protocol mismatch on FTP service"
-	case "ftp_privileged_port":
-		label = "Privileged source port on FTP"
-	case "ftp_command":
-		label = "Malformed FTP command"
 	default:
 		label = strings.Title(strings.ReplaceAll(label, "_", " "))
 	}
@@ -520,10 +496,3 @@ func timeFromUnixNano(value int64) time.Time {
 	}
 	return time.Unix(0, value).UTC()
 }
-
-// Constants exist to avoid importing tcpstate just for event kind names in the
-// maintenance loop. They intentionally match tcpstate.Event*.
-const (
-	tcpEventHandshake   = "handshake"
-	tcpEventLongSession = "long_session"
-)

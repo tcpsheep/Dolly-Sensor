@@ -1,0 +1,162 @@
+{
+  "name": "FTP abuse",
+  "version": 1,
+  "description": "Application rules for FTP services behind protected prefixes. Each rule watches one service port and judges sources individually (per_source): a control channel is slow, a data channel is bulk but bounded, and commands are short printable text. All thresholds are starting points - edit them for your traffic. Add an allow rule for known-good sources (backup servers, mirrors) before enabling discards.",
+  "rules": [
+    {
+      "name": "FTP control flood (single source)",
+      "description": "One source sustaining more than 50 pps of TCP toward the FTP control port (21). Control channels are slow: login, a handful of commands, then data. Sustained per-source rates above this are abuse or a broken client. Rate-limits the source, not the service.",
+      "enabled": true,
+      "mode": "conditional",
+      "match": {
+        "destination": "@protected",
+        "protocol": 6,
+        "dst_port": 21,
+        "direction": "inbound"
+      },
+      "condition": {
+        "window_seconds": 5,
+        "per_source": true,
+        "min_pps": 50,
+        "consecutive": 2,
+        "cooldown_seconds": 120
+      },
+      "action": {
+        "type": "rate-limit",
+        "rate_limit_bps": 10000000,
+        "duration_seconds": 300,
+        "scope": "source"
+      }
+    },
+    {
+      "name": "FTP control flood, severe",
+      "description": "One source sustaining more than 200 pps toward the FTP control port. Four times the soft threshold: a deliberate control-channel flood. Discards the source's traffic to the service for five minutes.",
+      "enabled": true,
+      "mode": "conditional",
+      "match": {
+        "destination": "@protected",
+        "protocol": 6,
+        "dst_port": 21,
+        "direction": "inbound"
+      },
+      "condition": {
+        "window_seconds": 5,
+        "per_source": true,
+        "min_pps": 200,
+        "consecutive": 2,
+        "cooldown_seconds": 120
+      },
+      "action": {
+        "type": "discard",
+        "duration_seconds": 300,
+        "scope": "source"
+      }
+    },
+    {
+      "name": "FTP data flood (single source)",
+      "description": "One source sustaining more than 500 pps toward the FTP data port (20). Data channels carry bulk, but a single transfer saturating the service is abuse. Rate-limits the source.",
+      "enabled": true,
+      "mode": "conditional",
+      "match": {
+        "destination": "@protected",
+        "protocol": 6,
+        "dst_port": 20,
+        "direction": "inbound"
+      },
+      "condition": {
+        "window_seconds": 5,
+        "per_source": true,
+        "min_pps": 500,
+        "consecutive": 2,
+        "cooldown_seconds": 120
+      },
+      "action": {
+        "type": "rate-limit",
+        "rate_limit_bps": 50000000,
+        "duration_seconds": 300,
+        "scope": "source"
+      }
+    },
+    {
+      "name": "Malformed FTP command",
+      "description": "FTP commands are short lines of printable text. A control-channel payload carrying bytes outside printable ASCII, tab, CR, or LF is a scanner, exploit, or junk. Needs at least three matching samples in two consecutive windows: one odd sample (truncation, retransmits) is not evidence.",
+      "enabled": true,
+      "mode": "conditional",
+      "match": {
+        "destination": "@protected",
+        "protocol": 6,
+        "dst_port": 21,
+        "direction": "inbound"
+      },
+      "condition": {
+        "window_seconds": 5,
+        "per_source": true,
+        "min_packets": 3,
+        "consecutive": 2,
+        "cooldown_seconds": 300,
+        "payload": {
+          "mode": "contains",
+          "encoding": "text",
+          "kind": "regex",
+          "pattern": "[^\\x20-\\x7e\\t\\r\\n]"
+        }
+      },
+      "action": {
+        "type": "rate-limit",
+        "rate_limit_bps": 10000000,
+        "duration_seconds": 300,
+        "scope": "source"
+      }
+    },
+    {
+      "name": "Oversized FTP command",
+      "description": "An FTP command longer than 512 captured payload bytes. Commands are a few characters; long ones are classic FTP bounce and buffer-overflow probes. Only fires on samples whose captured payload exceeds the limit, so heavy sampling truncation weakens it: raise the limit if your sampler captures less than 512 bytes.",
+      "enabled": true,
+      "mode": "conditional",
+      "match": {
+        "destination": "@protected",
+        "protocol": 6,
+        "dst_port": 21,
+        "direction": "inbound",
+        "payload_length_min": 513
+      },
+      "condition": {
+        "window_seconds": 5,
+        "per_source": true,
+        "min_packets": 2,
+        "consecutive": 2,
+        "cooldown_seconds": 300
+      },
+      "action": {
+        "type": "rate-limit",
+        "rate_limit_bps": 10000000,
+        "duration_seconds": 300,
+        "scope": "source"
+      }
+    },
+    {
+      "name": "UDP toward FTP control port",
+      "description": "FTP is TCP-only; UDP toward port 21 is junk or a reflection payload. Needs at least three sampled packets from one source in two consecutive windows before discarding, so isolated strays do nothing.",
+      "enabled": true,
+      "mode": "conditional",
+      "match": {
+        "destination": "@protected",
+        "protocol": 17,
+        "dst_port": 21,
+        "direction": "inbound"
+      },
+      "condition": {
+        "window_seconds": 5,
+        "per_source": true,
+        "min_packets": 3,
+        "consecutive": 2,
+        "cooldown_seconds": 300
+      },
+      "action": {
+        "type": "discard",
+        "duration_seconds": 300,
+        "scope": "source"
+      }
+    }
+  ]
+}

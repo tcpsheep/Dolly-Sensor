@@ -29,7 +29,6 @@
     destination: ["Destination", "Deep investigation of one protected IP"],
     intelligence: ["Intelligence", "Durable baselines, reputations, and trust evidence"],
     inspector: ["Inspector", "Recent sampled observations and decoded application context"],
-    connections: ["Connections", "Established TCP conversations inferred from sampled traffic"],
     blocklist: ["Blocklist", "Deterministic source blocking with protected-space guardrails"],
     rules: ["Rules", "Standing and conditional policies evaluated on sampled traffic"],
     mitigation: ["Mitigation", "Automated containment state and BGP action history"],
@@ -38,13 +37,8 @@
 
   const ALERT_TYPES = {
     volumetric: "Volumetric attack",
-    tcp_out_of_state: "Out-of-state TCP flood",
+    syn_flood: "Probable SYN flood",
     blocklist: "Blocklisted source",
-    ftp_control: "FTP control flood",
-    ftp_data: "FTP data flood",
-    ftp_protocol: "Protocol mismatch on FTP",
-    ftp_privileged_port: "Privileged source port on FTP",
-    ftp_command: "Malformed FTP command",
     rule_trigger: "Rule triggered",
     test: "Delivery test",
   };

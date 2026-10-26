@@ -2,6 +2,11 @@
 // decision logic. It turns observations and hot aggregates into explainable
 // findings: which signals fired, what the threat score is, and which mitigation
 // (if any) is appropriate.
+//
+// Detection is deliberately protocol-agnostic: blocklists, volumetric and
+// statistical evidence, SYN/ACK asymmetry, malformed-packet rates, and source
+// reputation. Application-specific knowledge does not live here; operators
+// express it as .dly rule packs loaded into the rules engine.
 package detect
 
 import (
@@ -16,30 +21,25 @@ import (
 	"dollysensor/internal/alerts"
 	"dollysensor/internal/config"
 	"dollysensor/internal/mitigate"
-	"dollysensor/internal/model"
 	"dollysensor/internal/netutil"
-	"dollysensor/internal/tcpstate"
 )
 
 // Intel supplies reputation facts without coupling detection to persistence.
 type Intel interface {
 	TrustScore(dst, src netip.Addr) float64
-	SourceSummary(dst, src netip.Addr) (syn, ack, handshakes uint64, trust float64, manual bool)
+	SourceSummary(dst, src netip.Addr) (syn, ack uint64, trust float64, manual bool)
 }
 
 // Options configures the detector.
 type Options struct {
-	Detection   config.DetectionConfig
-	FTP         config.FTPConfig
-	FTPStateTTL time.Duration
-	Intel       Intel
-	Protected   *netutil.PrefixSet
-	Trusted     *netutil.PrefixSet
+	Detection config.DetectionConfig
+	Intel     Intel
+	Protected *netutil.PrefixSet
+	Trusted   *netutil.PrefixSet
 }
 
 // Parameters is the effective tuning exposed in the status view.
 type Parameters struct {
-	Stateful        bool    `json:"stateful"`
 	Threshold       float64 `json:"threshold"`
 	Persistence     int     `json:"persistence"`
 	PPSFloor        float64 `json:"pps_floor"`
@@ -47,7 +47,6 @@ type Parameters struct {
 	WarmupWindows   int     `json:"warmup_windows"`
 	CooldownSeconds float64 `json:"cooldown_seconds"`
 	RateWindowSec   int     `json:"rate_window_seconds"`
-	FTPEnabled      bool    `json:"ftp_enabled"`
 }
 
 // Finding is one explainable detection result and its proposed action.
@@ -73,7 +72,6 @@ type State struct {
 	Warmup         bool      `json:"warmup"`
 	Attack         bool      `json:"attack"`
 	Consecutive    int       `json:"consecutive"`
-	OutOfStatePPS  float64   `json:"out_of_state_pps"`
 	Signals        []string  `json:"signals"`
 	LastEvaluation time.Time `json:"last_evaluation"`
 }
@@ -100,14 +98,12 @@ type baseline struct {
 	lastBPS     float64
 	lastScore   float64
 	signals     []string
-	oosRate     float64
 }
 
 // Detector is safe for concurrent evaluation and state reads.
 type Detector struct {
 	mu        sync.Mutex
 	cfg       config.DetectionConfig
-	ftpCfg    config.FTPConfig
 	intel     Intel
 	protected *netutil.PrefixSet
 	trusted   *netutil.PrefixSet
@@ -118,7 +114,6 @@ type Detector struct {
 	bpsFloor     float64
 	trustExempt  float64
 	destinations map[netip.Addr]*baseline
-	ftp          *ftpTracker
 }
 
 // New builds a detector from configuration.
@@ -145,7 +140,6 @@ func New(opts Options) *Detector {
 	opts.Detection.BPSFloor = bpsFloor
 	d := &Detector{
 		cfg:          opts.Detection,
-		ftpCfg:       opts.FTP,
 		intel:        opts.Intel,
 		protected:    opts.Protected,
 		trusted:      opts.Trusted,
@@ -159,16 +153,12 @@ func New(opts Options) *Detector {
 	if d.trustExempt <= 0 {
 		d.trustExempt = 70
 	}
-	if opts.FTP.Enabled {
-		d.ftp = newFTPTracker(opts.FTP, opts.FTPStateTTL, opts.Protected, opts.Trusted, opts.Intel)
-	}
 	return d
 }
 
 // Parameters returns effective tuning.
 func (d *Detector) Parameters() Parameters {
 	return Parameters{
-		Stateful:        d.cfg.Stateful,
 		Threshold:       d.threshold,
 		Persistence:     d.persistence,
 		PPSFloor:        d.ppsFloor,
@@ -176,7 +166,6 @@ func (d *Detector) Parameters() Parameters {
 		WarmupWindows:   d.warmupWindows(),
 		CooldownSeconds: d.cfg.Cooldown.Std().Seconds(),
 		RateWindowSec:   d.cfg.RateWindowSeconds,
-		FTPEnabled:      d.ftpCfg.Enabled,
 	}
 }
 
@@ -188,7 +177,7 @@ func (d *Detector) warmupWindows() int {
 }
 
 // Evaluate processes one round of destination snapshots.
-func (d *Detector) Evaluate(now time.Time, snapshots []aggregate.DestSnapshot, oos map[netip.Addr]tcpstate.OOSStat) []Result {
+func (d *Detector) Evaluate(now time.Time, snapshots []aggregate.DestSnapshot) []Result {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	results := make([]Result, 0, len(snapshots))
@@ -211,17 +200,14 @@ func (d *Detector) Evaluate(now time.Time, snapshots []aggregate.DestSnapshot, o
 			results = append(results, d.evaluateIdle(now, dst))
 			continue
 		}
-		result := d.evaluateOne(now, snapshot, oos[snapshot.Addr.Unmap()])
+		result := d.evaluateOne(now, snapshot)
 		results = append(results, result)
 	}
 	return results
 }
 
-func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos tcpstate.OOSStat) Result {
+func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot) Result {
 	dst := snap.Addr.Unmap()
-	if !d.cfg.Stateful {
-		oos = tcpstate.OOSStat{}
-	}
 	base := d.destinations[dst]
 	if base == nil {
 		base = &baseline{firstSeen: snap.FirstSeen}
@@ -238,7 +224,6 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos t
 	base.lastEval = now
 	base.lastPPS = pps
 	base.lastBPS = bps
-	base.oosRate = oos.Rate
 
 	zPPS, zBPS := 0.0, 0.0
 	if base.samples >= 2 {
@@ -261,11 +246,11 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos t
 	icmpShare := protocolShares["ICMP"] + protocolShares["ICMPv6"]
 	dominantPort, dominantPortShare := topPort(recent.DestPorts, total)
 
-	var topSyn, topHandshakes uint64
+	var topSyn, topACK uint64
 	var topTrust float64
 	var topManual bool
 	if top.SourceAddr.IsValid() && d.intel != nil {
-		topSyn, _, topHandshakes, topTrust, topManual = d.intel.SourceSummary(dst, top.SourceAddr)
+		topSyn, topACK, topTrust, topManual = d.intel.SourceSummary(dst, top.SourceAddr)
 	}
 	topGloballyTrusted := d.trusted != nil && top.SourceAddr.IsValid() && d.trusted.Contains(top.SourceAddr)
 	topSourceInternal := d.protected != nil && top.SourceAddr.IsValid() && d.protected.Contains(top.SourceAddr)
@@ -334,6 +319,28 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos t
 		if synCount > 100 && ackCount > 0 && synCount > ackCount*4 {
 			add(6, fmt.Sprintf("pure SYNs outnumber pure ACKs %.1fx", float64(synCount)/float64(ackCount)))
 		}
+		// A legitimate client that opens connections also answers: its ACK-flag
+		// samples (ACK and PSH-ACK) roughly match its SYN samples. A source
+		// whose SYNs outnumber its ACKs by an order of magnitude is sending
+		// handshakes that never complete.
+		if topSyn >= 100 && synOutnumbersACKs(topSyn, topACK, 10) && synShare >= 0.5 {
+			add(10, fmt.Sprintf("top source sent %s sampled SYNs against %s sampled ACKs (≥10:1)", formatCount(topSyn), formatCount(topACK)))
+		}
+		if malformedShare := ratio(recent.Malformed, total); malformedShare > 0 {
+			// Gated like the small-packet signal: malformed shares only score
+			// when there is real volume behind them, so a handful of odd
+			// samples from a busy network cannot trip it.
+			if pps >= d.ppsFloor*0.5 || bps >= d.bpsFloor*0.5 {
+				switch {
+				case malformedShare >= 0.6:
+					add(12, fmt.Sprintf("%.0f%% of packets are malformed (invalid TCP flag combinations, zero ports, or stray fragments)", malformedShare*100))
+				case malformedShare >= 0.3:
+					add(7, fmt.Sprintf("%.0f%% of packets are malformed", malformedShare*100))
+				case malformedShare >= 0.15:
+					add(3, fmt.Sprintf("%.0f%% of packets are malformed", malformedShare*100))
+				}
+			}
+		}
 		if udpShare >= 0.8 {
 			add(10, fmt.Sprintf("%.0f%% of packets are UDP", udpShare*100))
 		} else if udpShare >= 0.6 {
@@ -353,12 +360,6 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos t
 		} else if topShare >= 0.6 {
 			add(4, fmt.Sprintf("top source contributes %.0f%% of traffic", topShare*100))
 		}
-		if topSyn >= 100 && topHandshakes == 0 && synShare >= 0.5 {
-			add(10, fmt.Sprintf("top source has %s sampled SYNs and no completed handshake", formatCount(topSyn)))
-		}
-	}
-	if oos.Rate >= d.outOfStateFloor() {
-		add(12, fmt.Sprintf("%s out-of-state TCP packets/s", formatPPS(oos.Rate)))
 	}
 	switch {
 	case trustedTop:
@@ -423,7 +424,6 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos t
 		Warmup:         warmup,
 		Attack:         base.attack,
 		Consecutive:    base.consecutive,
-		OutOfStatePPS:  oos.Rate,
 		Signals:        append([]string(nil), signals...),
 		LastEvaluation: now,
 	}
@@ -441,7 +441,7 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos t
 	result := Result{State: state}
 	haveFinding := false
 	if base.attack && gate {
-		finding, action := d.volumetricFinding(now, dst, snap, state, top, topShare, topTrust, trustedTop, topSourceInternal, protocolShares, synShare, dominantPort, dominantPortShare, oos)
+		finding, action := d.volumetricFinding(now, dst, snap, state, top, topShare, topTrust, trustedTop, topSourceInternal, protocolShares, synShare, dominantPort, dominantPortShare)
 		result.Findings = append(result.Findings, finding)
 		haveFinding = action != nil
 	} else if warmup && gate && (pps >= d.ppsFloor*2 || bps >= d.bpsFloor*2) && (synShare >= 0.6 || pps >= d.ppsFloor*4) {
@@ -464,8 +464,10 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos t
 
 	// Layer 2: behavioural reputation. This can fire before the statistical
 	// layer has enough persistence, when the source's own history is damning.
-	if !haveFinding && base.samples >= 2 && !warmup && gate && top.SourceAddr.IsValid() && topShare >= 0.5 && topSyn >= 100 && topHandshakes == 0 && synShare >= 0.6 && pps >= math.Max(200, d.ppsFloor*0.25) && !trustedTop && !topSourceInternal {
-		reason := fmt.Sprintf("Probable SYN flood toward %s: top source %s has %s sampled SYNs and 0 completed handshakes; the destination saw %s (%s) with %.0f%% pure SYN.", dst, top.Source, formatCount(topSyn), formatPPS(pps), formatBPS(bps), synShare*100)
+	// The SYN:ACK asymmetry is the core stateless evidence: a source that
+	// opened hundreds of handshakes but never answered a single one.
+	if !haveFinding && base.samples >= 2 && !warmup && gate && top.SourceAddr.IsValid() && topShare >= 0.5 && topSyn >= 100 && synOutnumbersACKs(topSyn, topACK, 10) && synShare >= 0.6 && pps >= math.Max(200, d.ppsFloor*0.25) && !trustedTop && !topSourceInternal {
+		reason := fmt.Sprintf("Probable SYN flood toward %s: top source %s sent %s sampled SYNs but only %s sampled ACKs (≥10:1); the destination saw %s (%s) with %.0f%% pure SYN.", dst, top.Source, formatCount(topSyn), formatCount(topACK), formatPPS(pps), formatBPS(bps), synShare*100)
 		action := &mitigate.Request{
 			Kind:        mitigate.KindFlowspec,
 			Source:      top.SourceAddr,
@@ -490,56 +492,11 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos t
 				Source:      top.Source,
 				Score:       state.SmoothedScore,
 				Reason:      reason,
-				Signals:     append(signals, "behavioural reputation: no handshake evidence"),
+				Signals:     append(signals, "behavioural reputation: SYN-only source history"),
 			},
 			Action: action,
 		})
 		haveFinding = true
-	}
-
-	// Layer 3: out-of-state TCP at meaningful rate.
-	if !haveFinding && oos.Rate >= d.outOfStateFloor() {
-		severity := alerts.SeverityWarning
-		if oos.Rate >= math.Max(d.outOfStateFloor()*5, 500) {
-			severity = alerts.SeverityCritical
-		}
-		share := ratio(oos.OutOfState, oos.Total)
-		reason := fmt.Sprintf("%s out-of-state TCP packets/s toward %s (%.0f%% of recent TCP), with no plausible session. Sampled traffic can miss handshakes, so this is corroborating evidence rather than proof.", formatPPS(oos.Rate), dst, share*100)
-		if trustedTop {
-			severity = alerts.SeverityWarning
-			reason += " The dominant source is trusted; out-of-state evidence alone is not enough to mitigate it."
-		} else if topSourceInternal {
-			reason += " The dominant source is inside the protected network; external mitigation is intentionally suppressed."
-		}
-		finding := Finding{Alert: alerts.Candidate{
-			Key:         "tcp-state|" + dst.String(),
-			Severity:    severity,
-			Type:        "tcp_out_of_state",
-			Layer:       "tcp",
-			Destination: dst.String(),
-			Source:      top.Source,
-			Score:       state.SmoothedScore,
-			Reason:      reason,
-			Signals:     []string{fmt.Sprintf("%s of %s recent TCP packets had no tracked session", formatCount(oos.OutOfState), formatCount(oos.Total))},
-		}}
-		if severity == alerts.SeverityCritical && !trustedTop && !topSourceInternal {
-			request := &mitigate.Request{
-				Kind:        mitigate.KindFlowspec,
-				Destination: dst,
-				Protocol:    6,
-				Action:      "rate-limit",
-				Reason:      "out-of-state TCP toward " + dst.String(),
-				Owner:       "tcp-state",
-			}
-			// Name the source when it clearly dominates. Otherwise keep the
-			// rule destination-oriented rather than blaming an arbitrary top
-			// source in a distributed out-of-state flood.
-			if top.SourceAddr.IsValid() && topShare >= 0.6 {
-				request.Source = top.SourceAddr
-			}
-			finding.Action = request
-		}
-		result.Findings = append(result.Findings, finding)
 	}
 
 	d.updateBaseline(base, pps, bps, warmup)
@@ -554,7 +511,6 @@ func (d *Detector) evaluateIdle(now time.Time, dst netip.Addr) Result {
 	base.lastEval = now
 	base.lastPPS = 0
 	base.lastBPS = 0
-	base.oosRate = 0
 	base.lastScore = 0
 	base.signals = nil
 	base.consecutive = 0
@@ -570,10 +526,10 @@ func (d *Detector) evaluateIdle(now time.Time, dst netip.Addr) Result {
 			base.calm = 0
 		}
 	}
-	return Result{State: stateFromBaseline(dst, base, d.threshold, d.warmupWindows(), d.outOfStateFloor())}
+	return Result{State: stateFromBaseline(dst, base, d.threshold, d.warmupWindows())}
 }
 
-func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggregate.DestSnapshot, state State, top aggregate.SourceCount, topShare, topTrust float64, trusted, internal bool, protocols map[string]float64, synShare float64, dominantPort uint16, dominantPortShare float64, oos tcpstate.OOSStat) (Finding, *mitigate.Request) {
+func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggregate.DestSnapshot, state State, top aggregate.SourceCount, topShare, topTrust float64, trusted, internal bool, protocols map[string]float64, synShare float64, dominantPort uint16, dominantPortShare float64) (Finding, *mitigate.Request) {
 	severity := alerts.SeverityCritical
 	qualified := true
 	if internal {
@@ -604,8 +560,8 @@ func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggrega
 	}
 	reason += "."
 	if synShare < 0.3 {
-		if topSyn, _, handshakes, _, _ := d.sourceStats(dst, top.SourceAddr); topSyn >= 100 && handshakes == 0 {
-			reason += fmt.Sprintf(" The top source has %s sampled SYNs and 0 completed handshakes.", formatCount(topSyn))
+		if topSyn, topACK, _, _ := d.sourceStats(dst, top.SourceAddr); topSyn >= 100 && synOutnumbersACKs(topSyn, topACK, 10) {
+			reason += fmt.Sprintf(" The top source sent %s sampled SYNs against %s sampled ACKs.", formatCount(topSyn), formatCount(topACK))
 		}
 	}
 	if internal {
@@ -614,9 +570,6 @@ func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggrega
 		reason += " The dominant source is trusted and the evidence is not strong enough to justify mitigation."
 	} else if trusted && severity == alerts.SeverityCritical {
 		reason += " The dominant source is trusted, but the volume is extreme; only a rate-limit is considered."
-	}
-	if oos.Rate > 0 {
-		reason += fmt.Sprintf(" Out-of-state TCP is running at %s.", formatPPS(oos.Rate))
 	}
 	signals := append([]string(nil), state.Signals...)
 	if top.Source != "" {
@@ -641,13 +594,13 @@ func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggrega
 		return finding, nil
 	}
 	precise := top.SourceAddr.IsValid() && topShare >= 0.6 && !d.protected.Contains(top.SourceAddr)
-	topSyn, _, handshakes, _, _ := d.sourceStats(dst, top.SourceAddr)
+	topSyn, topACK, _, _ := d.sourceStats(dst, top.SourceAddr)
 	// RTBH is deliberately rare. It is only for a confirmed, extreme SYN flood
-	// from one external source that has never completed a handshake. Everything
-	// else gets a precise Flowspec rule. This keeps a blunt blackhole out of
-	// ambiguous or distributed incidents.
+	// from one external source whose traffic is almost pure SYN with a stark
+	// SYN:ACK imbalance. Everything else gets a precise Flowspec rule. This
+	// keeps a blunt blackhole out of ambiguous or distributed incidents.
 	severeRTBH := precise && !trusted && protocol == 6 && synShare >= 0.5 &&
-		topShare >= 0.9 && topTrust < 20 && topSyn >= 1_000 && handshakes == 0 &&
+		topShare >= 0.9 && topTrust < 20 && topSyn >= 1_000 && synOutnumbersACKs(topSyn, topACK, 20) &&
 		state.SmoothedScore >= d.threshold+20 &&
 		(state.PPS >= math.Max(d.ppsFloor*200, 1_000_000) ||
 			state.BPS >= math.Max(d.bpsFloor*50, 1_000_000_000))
@@ -693,22 +646,14 @@ func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggrega
 	if trusted {
 		request.Action = "rate-limit"
 	}
-	if oos.Rate >= d.outOfStateFloor() {
-		request.Protocol = 6
-		request.DstPort = 0
-		request.TCPFlags = 0
-		if request.Source.IsValid() {
-			request.Action = "rate-limit"
-		}
-	}
 	finding.Action = request
 	_ = now
 	return finding, request
 }
 
-func (d *Detector) sourceStats(dst, src netip.Addr) (uint64, uint64, uint64, float64, bool) {
+func (d *Detector) sourceStats(dst, src netip.Addr) (uint64, uint64, float64, bool) {
 	if d.intel == nil || !src.IsValid() {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, false
 	}
 	return d.intel.SourceSummary(dst, src)
 }
@@ -742,22 +687,6 @@ func (d *Detector) updateBaseline(base *baseline, pps, bps float64, warmup bool)
 	base.samples++
 }
 
-func (d *Detector) outOfStateFloor() float64 {
-	if d.cfg.OutOfStateMinPPS > 0 {
-		return d.cfg.OutOfStateMinPPS
-	}
-	return 100
-}
-
-// CheckFTP runs the application filter for one observation. It returns zero or
-// more findings.
-func (d *Detector) CheckFTP(obs *model.Observation, now time.Time) []Finding {
-	if d.ftp == nil {
-		return nil
-	}
-	return d.ftp.check(obs, now)
-}
-
 // State returns the last detection state for a destination.
 func (d *Detector) State(dst netip.Addr) (State, bool) {
 	d.mu.Lock()
@@ -766,7 +695,7 @@ func (d *Detector) State(dst netip.Addr) (State, bool) {
 	if base == nil || base.lastEval.IsZero() {
 		return State{}, false
 	}
-	return stateFromBaseline(dst, base, d.threshold, d.warmupWindows(), d.outOfStateFloor()), true
+	return stateFromBaseline(dst, base, d.threshold, d.warmupWindows()), true
 }
 
 // States returns every recent detection state.
@@ -778,13 +707,13 @@ func (d *Detector) States() []State {
 		if base.lastEval.IsZero() {
 			continue
 		}
-		out = append(out, stateFromBaseline(dst, base, d.threshold, d.warmupWindows(), d.outOfStateFloor()))
+		out = append(out, stateFromBaseline(dst, base, d.threshold, d.warmupWindows()))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Destination < out[j].Destination })
 	return out
 }
 
-func stateFromBaseline(dst netip.Addr, base *baseline, threshold float64, warmup int, oosFloor float64) State {
+func stateFromBaseline(dst netip.Addr, base *baseline, threshold float64, warmup int) State {
 	state := State{
 		Destination:    dst.String(),
 		Score:          round(base.lastScore, 1),
@@ -798,7 +727,6 @@ func stateFromBaseline(dst netip.Addr, base *baseline, threshold float64, warmup
 		Warmup:         base.samples < warmup,
 		Attack:         base.attack,
 		Consecutive:    base.consecutive,
-		OutOfStatePPS:  base.oosRate,
 		Signals:        append([]string(nil), base.signals...),
 		LastEvaluation: base.lastEval,
 	}
@@ -815,7 +743,7 @@ func stateFromBaseline(dst netip.Addr, base *baseline, threshold float64, warmup
 	return state
 }
 
-// Cleanup forgets idle baseline state and FTP counters.
+// Cleanup forgets idle baseline state.
 func (d *Detector) Cleanup(now time.Time, ttl time.Duration) {
 	d.mu.Lock()
 	for dst, base := range d.destinations {
@@ -824,9 +752,6 @@ func (d *Detector) Cleanup(now time.Time, ttl time.Duration) {
 		}
 	}
 	d.mu.Unlock()
-	if d.ftp != nil {
-		d.ftp.cleanup(now)
-	}
 }
 
 func topSource(recent aggregate.Recent) aggregate.SourceCount {
@@ -902,6 +827,18 @@ func ratio(part, total uint64) float64 {
 		return 0
 	}
 	return float64(part) / float64(total)
+}
+
+// synOutnumbersACKs reports whether a source's sampled SYN count exceeds its
+// sampled ACK count by at least the given ratio. A healthy client answers the
+// handshakes it starts, so its ACK-bearing samples (ACK and PSH-ACK) track its
+// SYN count; a stark imbalance is stateless evidence of handshakes that are
+// never completed. ack == 0 always qualifies whenever syn > 0.
+func synOutnumbersACKs(syn, ack uint64, ratio float64) bool {
+	if syn == 0 {
+		return false
+	}
+	return float64(ack)*ratio < float64(syn)
 }
 
 func safeRatio(value, reference float64) float64 {

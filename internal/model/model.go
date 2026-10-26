@@ -141,11 +141,6 @@ type Observation struct {
 
 	ARP *ARPInfo `json:"arp,omitempty"`
 
-	SessionState       string `json:"session_state,omitempty"`
-	SessionKey         string `json:"session_key,omitempty"`
-	HandshakeCompleted bool   `json:"handshake_completed,omitempty"`
-	OutOfState         bool   `json:"out_of_state,omitempty"`
-
 	DstProtected bool            `json:"dst_protected"`
 	SrcProtected bool            `json:"src_protected"`
 	Direction    PacketDirection `json:"direction"`
@@ -162,6 +157,40 @@ type ARPInfo struct {
 	TargetIP  netip.Addr `json:"target_ip"`
 }
 
+// Malformed reports whether this sampled packet shows protocol-level
+// anomalies that legitimate traffic essentially never carries: impossible TCP
+// flag combinations, a TCP or UDP header with a zero port, a completely
+// flagless TCP header, or a non-initial IP fragment. It is a stateless,
+// protocol-agnostic indicator: no connection state is required to judge it.
+func (o Observation) Malformed() bool {
+	if o.NonInitialFrag {
+		return true
+	}
+	switch o.Protocol {
+	case 6:
+		if o.TCPFlags == 0 {
+			return true
+		}
+		if o.TCPFlags.Has(TCPSYN) && o.TCPFlags.Has(TCPFIN) {
+			return true
+		}
+		if o.TCPFlags.Has(TCPSYN) && o.TCPFlags.Has(TCPRST) {
+			return true
+		}
+		if o.TCPFlags.Has(TCPFIN) && o.TCPFlags.Has(TCPRST) {
+			return true
+		}
+		if o.SrcPort == 0 || o.DstPort == 0 {
+			return true
+		}
+	case 17:
+		if o.SrcPort == 0 || o.DstPort == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Clone returns a deep copy safe to hand to another goroutine or store.
 func (o Observation) Clone() Observation {
 	c := o
@@ -172,7 +201,7 @@ func (o Observation) Clone() Observation {
 }
 
 // Finalize computes derived text fields from the decoded values. It is called
-// once, after sampling metadata and session enrichment have been attached.
+// once, after sampling metadata has been attached.
 func (o *Observation) Finalize() {
 	o.SrcIP = o.SrcIP.Unmap()
 	o.DstIP = o.DstIP.Unmap()
@@ -319,9 +348,6 @@ func summarize(o Observation) string {
 		} else {
 			b.WriteString(o.App.Protocol)
 		}
-	}
-	if o.OutOfState {
-		b.WriteString(" | out-of-state")
 	}
 	return b.String()
 }

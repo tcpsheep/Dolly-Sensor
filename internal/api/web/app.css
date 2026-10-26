@@ -375,6 +375,11 @@ body.drawer-open { overflow: hidden; }
 .drag-handle { cursor: grab; color: var(--faint); user-select: none; font-size: 11px; letter-spacing: -1px; padding: 2px 4px; border-radius: 4px; }
 .drag-handle:hover { color: var(--muted); background: rgba(67, 152, 159, .10); }
 .rule-order-cell { display: flex; gap: 8px; align-items: flex-start; }
+.pack-entry { border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; background: rgba(15, 36, 50, .4); }
+.pack-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pack-head strong { font-size: 12.5px; }
+.pack-head .muted { font-size: 10.5px; }
+.pack-head .btn { margin-left: auto; }
 tr.rule-row[draggable="true"] { cursor: default; }
 tr.rule-row.dragging { opacity: .45; }
 tr.rule-row.drag-over-above td { border-top: 2px solid var(--accent); }

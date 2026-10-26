@@ -17,13 +17,14 @@ import (
 
 // RulesData is the complete rules catalog view returned by the API.
 type RulesData struct {
-	Rules    []rules.Rule    `json:"rules"`
-	Summary  rules.Summary   `json:"summary"`
-	Limits   rules.Limits    `json:"limits"`
-	Defaults rules.Defaults  `json:"defaults"`
-	Save     rules.SaveState `json:"save"`
-	Enabled  bool            `json:"enabled"`
-	Warnings []string        `json:"warnings,omitempty"`
+	Rules    []rules.Rule       `json:"rules"`
+	Summary  rules.Summary      `json:"summary"`
+	Limits   rules.Limits       `json:"limits"`
+	Defaults rules.Defaults     `json:"defaults"`
+	Save     rules.SaveState    `json:"save"`
+	Enabled  bool               `json:"enabled"`
+	Packs    []rules.PackSummary `json:"packs"`
+	Warnings []string           `json:"warnings,omitempty"`
 }
 
 func (s *Sensor) ruleEvaluationLoop(ctx context.Context) {
@@ -61,7 +62,44 @@ func (s *Sensor) RuleData() RulesData {
 	if data.Limits.AllowDestinationDiscard {
 		data.Warnings = append(data.Warnings, "Destination-only discard is enabled. A rule-scoped discard can affect every source sending to the selected destination prefix.")
 	}
+	packs, err := rules.BuiltinPacks()
+	if err != nil {
+		data.Warnings = append(data.Warnings, "Built-in rule packs could not be read: "+err.Error())
+	} else {
+		data.Packs = packs
+	}
 	return data
+}
+
+// ImportPackByName imports one of the packs embedded in the binary. The
+// result reports the created rules and any pack rules that already existed.
+func (s *Sensor) ImportPackByName(ctx context.Context, name string) (rules.ImportResult, error) {
+	pack, err := rules.BuiltinPack(name)
+	if err != nil {
+		return rules.ImportResult{}, err
+	}
+	return s.importPack(ctx, pack)
+}
+
+// ImportPackData imports a user-supplied .dly pack document.
+func (s *Sensor) ImportPackData(ctx context.Context, data []byte) (rules.ImportResult, error) {
+	pack, err := rules.ParsePack(data)
+	if err != nil {
+		return rules.ImportResult{}, err
+	}
+	return s.importPack(ctx, pack)
+}
+
+func (s *Sensor) importPack(ctx context.Context, pack rules.Pack) (rules.ImportResult, error) {
+	result, err := s.ruleStore.ImportPack(pack)
+	if err != nil {
+		return rules.ImportResult{}, err
+	}
+	for _, rule := range result.Imported {
+		s.afterRuleMutation(ctx, rule.ID)
+	}
+	s.publishRulesSummary()
+	return result, nil
 }
 
 // CreateRule persists and applies a new operator rule.
@@ -385,7 +423,8 @@ func (s *Sensor) ruleTriggerFinding(trigger rules.Trigger) detect.Finding {
 	}
 	destinationLabel := rule.Match.Destination
 	sourceLabel := rule.Match.Source
-	if rule.Action.Scope == rules.ScopeFlow && trigger.Observation.SrcIP.IsValid() && trigger.Observation.DstIP.IsValid() {
+	switch {
+	case rule.Action.Scope == rules.ScopeFlow && trigger.Observation.SrcIP.IsValid() && trigger.Observation.DstIP.IsValid():
 		request.SourcePrefix = netutil.ClampHost(trigger.Observation.SrcIP)
 		request.DestinationPrefix = netutil.ClampHost(trigger.Observation.DstIP)
 		request.Protocol = trigger.Observation.Protocol
@@ -393,7 +432,20 @@ func (s *Sensor) ruleTriggerFinding(trigger rules.Trigger) detect.Finding {
 		request.DstPort = trigger.Observation.DstPort
 		destinationLabel = request.DestinationPrefix.String()
 		sourceLabel = request.SourcePrefix.String()
-	} else {
+	case rule.Action.Scope == rules.ScopeSource && trigger.Observation.SrcIP.IsValid():
+		// Source-scoped enforcement: the rule's header match pinned to the
+		// address that actually tripped the threshold. The destination comes
+		// from the observation for wildcard rules ("@protected") and from
+		// the rule header otherwise.
+		request.SourcePrefix = netutil.ClampHost(trigger.Observation.SrcIP)
+		sourceLabel = request.SourcePrefix.String()
+		if rule.Match.Destination == rules.DestinationWildcard {
+			request.DestinationPrefix = netutil.ClampHost(trigger.Observation.DstIP)
+			destinationLabel = request.DestinationPrefix.String()
+		} else if prefix, err := parseRulePrefix(rule.Match.Destination); err == nil {
+			request.DestinationPrefix = prefix
+		}
+	default:
 		if prefix, err := parseRulePrefix(rule.Match.Destination); err == nil {
 			request.DestinationPrefix = prefix
 		}
@@ -416,17 +468,29 @@ func (s *Sensor) ruleTriggerFinding(trigger rules.Trigger) detect.Finding {
 			trigger.Observation.SrcIP, trigger.Observation.SrcPort,
 			trigger.Observation.DstIP, trigger.Observation.DstPort, trigger.Observation.Protocol)
 	}
+	if rule.Action.Scope == rules.ScopeSource {
+		key = fmt.Sprintf("rule|%s|%s|%s", rule.ID, trigger.Observation.SrcIP, destinationLabel)
+	}
 	signals := []string{
 		fmt.Sprintf("rule: %s", rule.Name),
 		fmt.Sprintf("mode: %s", rule.Mode),
 		fmt.Sprintf("scope: %s", rule.Action.Scope),
 		"sampled sFlow evaluation, not inline packet inspection",
 	}
+	if rule.Pack != "" {
+		signals = append(signals, "pack: "+rule.Pack)
+	}
+	if rule.Condition.PerSource {
+		signals = append(signals, "thresholds judged per source address")
+	}
 	if rule.Condition.Payload.Mode != rules.PayloadNone {
 		signals = append(signals, "payload evaluated on sampled packets (up to the capture budget)")
 	}
 	if rule.Action.Scope == rules.ScopeFlow {
 		signals = append(signals, "enforcement narrowed to the observed conversation")
+	}
+	if rule.Action.Scope == rules.ScopeSource {
+		signals = append(signals, "enforcement narrowed to the triggering source")
 	}
 	return detect.Finding{
 		Alert: alerts.Candidate{

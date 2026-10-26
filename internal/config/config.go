@@ -64,7 +64,6 @@ type Config struct {
 	Detection      DetectionConfig   `json:"detection"`
 	Mitigation     MitigationConfig  `json:"mitigation"`
 	Rules          RulesConfig       `json:"rules"`
-	Protocols      ProtocolConfig    `json:"protocols"`
 	BGP            BGPConfig         `json:"bgp"`
 	Alerting       AlertingConfig    `json:"alerting"`
 	Persistence    PersistenceConfig `json:"persistence"`
@@ -83,17 +82,15 @@ type DashboardConfig struct {
 }
 
 type DetectionConfig struct {
-	// Stateful enables TCP session tracking. It is off by default because sampled
-	// sFlow often cannot reconstruct connections; when false the sensor still
-	// scores sampled rates and protocol mixes, but it does not infer connections,
-	// report out-of-state traffic, or credit handshakes and long sessions.
-	Stateful            bool     `json:"stateful"`
+	// Detection is stateless by design: sampled sFlow cannot reliably
+	// reconstruct TCP connections, so no connection table is kept and no
+	// out-of-state or handshake evidence is used. Scoring relies on sampled
+	// rates, protocol and flag mixes, source reputation, and blocklists.
 	EvaluationInterval  Duration `json:"evaluation_interval"`
 	RateWindowSeconds   int      `json:"rate_window_seconds"`
 	Cooldown            Duration `json:"cooldown"`
 	WarmupWindows       int      `json:"warmup_windows"`
 	TrustExemptionScore float64  `json:"trust_exemption_score"`
-	OutOfStateMinPPS    float64  `json:"out_of_state_min_pps"`
 	Threshold           float64  `json:"threshold"`
 	Persistence         int      `json:"persistence"`
 	PPSFloor            float64  `json:"pps_floor"`
@@ -131,18 +128,10 @@ type RulesConfig struct {
 	AllowDestinationDiscard bool   `json:"allow_destination_discard"`
 }
 
-type ProtocolConfig struct {
-	FTP FTPConfig `json:"ftp"`
-}
-
-type FTPConfig struct {
-	Enabled             bool     `json:"enabled"`
-	ControlRateLimitPPS float64  `json:"control_rate_limit_pps"`
-	DataRateLimitPPS    float64  `json:"data_rate_limit_pps"`
-	ExemptTrustScore    float64  `json:"exempt_trust_score"`
-	MaxCommandBytes     int      `json:"max_command_bytes"`
-	BlockDuration       Duration `json:"block_duration"`
-}
+// Application-specific detection no longer lives in code or configuration.
+// Protocol knowledge (FTP, SSH, HTTP, ...) is expressed as .dly rule packs
+// imported into the rules engine, so a "protocols" config section no longer
+// exists and old files that set one fail loudly with an unknown-field error.
 
 type BGPConfig struct {
 	Enabled        bool     `json:"enabled"`
@@ -175,12 +164,8 @@ type MemoryConfig struct {
 	AlertHistory        int      `json:"alert_history"`
 	DestinationStatsTTL Duration `json:"destination_stats_ttl"`
 	BaselineTTL         Duration `json:"baseline_ttl"`
-	TCPSessionTTL       Duration `json:"tcp_session_ttl"`
-	TCPPendingTTL       Duration `json:"tcp_pending_ttl"`
-	MaxTCPSessions      int      `json:"max_tcp_sessions"`
 	MaxProfiles         int      `json:"max_profiles"`
 	TrustDecayInterval  Duration `json:"trust_decay_interval"`
-	FTPStateTTL         Duration `json:"ftp_state_ttl"`
 }
 
 // Default returns safe, conservative defaults. Protected CIDRs intentionally
@@ -197,13 +182,11 @@ func Default() Config {
 		ProtectedCIDRs: nil,
 		TrustedSources: nil,
 		Detection: DetectionConfig{
-			Stateful:            false,
 			EvaluationInterval:  Duration(time.Second),
 			RateWindowSeconds:   5,
 			Cooldown:            Duration(10 * time.Minute),
 			WarmupWindows:       30,
 			TrustExemptionScore: 70,
-			OutOfStateMinPPS:    100,
 			Threshold:           DefaultThreatThreshold,
 			Persistence:         DefaultPersistence,
 			PPSFloor:            DefaultPPSFloor,
@@ -226,14 +209,6 @@ func Default() Config {
 			MaxFlowsPerRule: 8192,
 			EvaluationQueue: 4096,
 		},
-		Protocols: ProtocolConfig{FTP: FTPConfig{
-			Enabled:             true,
-			ControlRateLimitPPS: 50,
-			DataRateLimitPPS:    500,
-			ExemptTrustScore:    70,
-			MaxCommandBytes:     512,
-			BlockDuration:       Duration(time.Minute),
-		}},
 		BGP: BGPConfig{
 			Enabled:        false,
 			LocalAS:        64512,
@@ -257,12 +232,8 @@ func Default() Config {
 			AlertHistory:        500,
 			DestinationStatsTTL: Duration(10 * time.Minute),
 			BaselineTTL:         Duration(30 * time.Minute),
-			TCPSessionTTL:       Duration(5 * time.Minute),
-			TCPPendingTTL:       Duration(10 * time.Second),
-			MaxTCPSessions:      100000,
 			MaxProfiles:         10000,
 			TrustDecayInterval:  Duration(15 * time.Minute),
-			FTPStateTTL:         Duration(5 * time.Minute),
 		},
 	}
 }
@@ -343,9 +314,6 @@ func (c *Config) Validate() ([]string, error) {
 	if c.Detection.WarmupWindows < 1 {
 		errs = append(errs, errors.New("detection.warmup_windows must be at least 1"))
 	}
-	if c.Detection.OutOfStateMinPPS < 0 {
-		errs = append(errs, errors.New("detection.out_of_state_min_pps must not be negative"))
-	}
 	if c.Detection.TrustExemptionScore < 0 || c.Detection.TrustExemptionScore > 100 {
 		errs = append(errs, errors.New("detection.trust_exemption_score must be between 0 and 100"))
 	}
@@ -403,20 +371,6 @@ func (c *Config) Validate() ([]string, error) {
 		}
 		if c.Rules.AllowDestinationDiscard {
 			warnings = append(warnings, "rules.allow_destination_discard is enabled; a rule-scoped discard may target an entire protected destination without a source prefix")
-		}
-	}
-	if c.Protocols.FTP.Enabled {
-		if c.Protocols.FTP.ControlRateLimitPPS < 0 || c.Protocols.FTP.DataRateLimitPPS < 0 {
-			errs = append(errs, errors.New("protocols.ftp rate limits must not be negative"))
-		}
-		if c.Protocols.FTP.MaxCommandBytes < 64 {
-			errs = append(errs, errors.New("protocols.ftp.max_command_bytes must be at least 64"))
-		}
-		if c.Protocols.FTP.BlockDuration <= 0 {
-			errs = append(errs, errors.New("protocols.ftp.block_duration must be positive"))
-		}
-		if c.Protocols.FTP.ExemptTrustScore < 0 || c.Protocols.FTP.ExemptTrustScore > 100 {
-			errs = append(errs, errors.New("protocols.ftp.exempt_trust_score must be between 0 and 100"))
 		}
 	}
 
@@ -500,20 +454,11 @@ func (c *Config) Validate() ([]string, error) {
 	if c.Memory.DestinationStatsTTL <= 0 || c.Memory.BaselineTTL <= 0 {
 		errs = append(errs, errors.New("memory destination/baseline TTLs must be positive"))
 	}
-	if c.Memory.TCPSessionTTL <= 0 || c.Memory.TCPPendingTTL <= 0 {
-		errs = append(errs, errors.New("memory TCP TTLs must be positive"))
-	}
-	if c.Memory.MaxTCPSessions < 1 {
-		errs = append(errs, errors.New("memory.max_tcp_sessions must be at least 1"))
-	}
 	if c.Memory.MaxProfiles < 1 {
 		errs = append(errs, errors.New("memory.max_profiles must be at least 1"))
 	}
 	if c.Memory.TrustDecayInterval <= 0 {
 		errs = append(errs, errors.New("memory.trust_decay_interval must be positive"))
-	}
-	if c.Memory.FTPStateTTL <= 0 {
-		errs = append(errs, errors.New("memory.ftp_state_ttl must be positive"))
 	}
 
 	if host, _, err := net.SplitHostPort(c.Dashboard.Listen); err == nil && !isLoopbackHost(host) {

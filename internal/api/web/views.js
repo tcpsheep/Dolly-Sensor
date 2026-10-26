@@ -172,20 +172,10 @@
       ["Frame length", (packet.frame_length || "—") + " bytes (stripped " + (packet.stripped || 0) + ")"],
       ["Source / destination MAC", (packet.src_mac || "—") + " → " + (packet.dst_mac || "—")],
     ];
-    const sessionPairs = [
-      ["Session state", packet.session_state || "unknown"],
-      ["Session key", packet.session_key || "—"],
-      ["Handshake complete", packet.handshake_completed ? "yes" : "no"],
-      ["Out of state", packet.out_of_state ? badge("out of state", "warn") : "no"],
-    ];
-    const stateful = !(D.state.status && D.state.status.detection && D.state.status.detection.stateful === false);
     const body = el("div", { class: "stack" },
       el("div", { class: "banner banner-info", text: packet.summary || "No summary available." }),
       section("Packet", kvList(flowPairs)),
       section("Capture and sampling", kvList(capturePairs)),
-      stateful
-        ? section("TCP state evidence", kvList(sessionPairs))
-        : section("TCP state evidence", el("div", { class: "empty-state", text: "Stateful protection is disabled; this packet was not matched against a connection table." })),
       section("Application context", appPairs.length ? kvList(appPairs) : el("div", { class: "empty-state", text: "No application metadata matched this packet." })),
       packet.arp ? section("ARP", kvList([
         ["Operation", packet.arp.operation === 1 ? "request" : packet.arp.operation === 2 ? "reply" : packet.arp.operation],
@@ -355,20 +345,17 @@
       ["Datagrams", fmtInt(health.collector.datagrams) + " · " + fmtInt(health.collector.decode_errors) + " decode errors"],
       ["Dropped", fmtInt(health.collector.dropped_datagrams) + " datagrams / " + fmtInt(health.collector.dropped_findings) + " findings"],
       ["Protected destinations", fmtInt(health.profiles) + " profiles · " + fmtInt(health.destination_live) + " live"],
-      ["TCP state", (health.detection && health.detection.stateful) ? fmtInt(health.tcp.established) + " established · " + fmtInt(health.tcp.out_of_state) + " out of state" : "disabled (stateless protection)"],
       ["BGP", health.bgp ? health.bgp.state + " · " + (health.bgp.peer || "peer") : "disabled (simulation)"],
       ["Last packet", timeNode(health.collector.last_packet)],
       ["Last evaluation", timeNode(health.collector.last_evaluation)],
       ["Persistence", health.persistence.last_save ? timeNode(health.persistence.last_save) : "not saved yet"],
     ];
     const detectionPairs = [
-      ["Protection", data.detection.stateful ? "stateful" : "stateless"],
       ["Threat threshold", fmtNumber(data.detection.threshold, 1)],
       ["Persistence / warm-up", data.detection.persistence + " windows / " + data.detection.warmup_windows],
       ["Floor PPS / BPS", fmtPPS(data.detection.pps_floor) + " / " + fmtBPS(data.detection.bps_floor)],
       ["Cooldown", fmtDuration(data.detection.cooldown_seconds)],
       ["Rate window", data.detection.rate_window_seconds + " seconds"],
-      ["FTP application checks", data.detection.ftp_enabled ? "enabled" : "disabled"],
     ];
     const view = el("div", {},
       simBanner(data.status),
@@ -554,7 +541,6 @@
     const profile = detail.profile || null;
     const live = detail.live || null;
     const detection = detail.detection || null;
-    const stateful = !(D.state.status && D.state.status.detection && D.state.status.detection.stateful === false);
     const recentAlerts = detail.alerts || [];
     const actions = detail.actions || [];
     const recent = detail.recent || [];
@@ -573,7 +559,7 @@
         el("span", { class: "cell-mono", text: source.source }),
         fmtNumber(source.trust, 1),
         source.manual ? badge("manual", "info") : badge("earned", "muted"),
-        fmtInt(source.syn) + " / " + fmtInt(source.ack) + " / " + fmtInt(source.handshakes),
+        fmtInt(source.syn) + " / " + fmtInt(source.ack),
         timeNode(source.last_seen),
         el("div", { class: "inline-actions" },
           button(source.manual ? "Revoke trust" : "Trust", {
@@ -592,7 +578,7 @@
         ),
       ],
     }));
-    const sourcesTable = table(["Source", "Trust", "Mode", { label: "SYN / ACK / handshakes", class: "numeric" }, "Last seen", "Actions"], sourceRows, { compact: true, empty: "No source reputations recorded for this destination." });
+    const sourcesTable = table(["Source", "Trust", "Mode", { label: "SYN / ACK", class: "numeric" }, "Last seen", "Actions"], sourceRows, { compact: true, empty: "No source reputations recorded for this destination." });
     const distribution = (live && live.recent) || null;
     const profileProtocols = distribution ? distribution.protocols : (profile ? profile.protocols : []);
     const profilePorts = distribution ? distribution.dest_ports : (profile ? profile.dest_ports : []);
@@ -629,7 +615,6 @@
       ["Samples", fmtInt(detection.samples)],
       ["Baseline PPS / BPS", fmtPPS(detection.baseline_pps) + " / " + fmtBPS(detection.baseline_bps)],
       ["Z PPS / Z BPS", fmtNumber(detection.z_pps, 2) + " / " + fmtNumber(detection.z_bps, 2)],
-      ["Out of state", stateful ? fmtPPS(detection.out_of_state_pps) : "not tracked (stateless)"],
       ["Last evaluation", timeNode(detection.last_evaluation)],
     ] : [["Detection", "No evaluation yet"]];
     const signals = detection && detection.signals ? detection.signals : [];
@@ -665,7 +650,7 @@
         kpi("Current traffic", fmtPPS(live && live.pps), fmtBPS(live && live.bps), { valueId: "dest-pps" }),
         kpi("Baseline", fmtPPS(detection && detection.baseline_pps), fmtBPS(detection && detection.baseline_bps)),
         kpi("Threat score", fmtNumber(score, 1), "smoothed " + fmtNumber(smoothed, 1), { variant: currentThreat === "under_attack" ? "danger" : currentThreat === "anomalous" ? "warn" : "accent" }),
-        kpi("Out of state", stateful ? fmtPPS(detection && detection.out_of_state_pps) : "off", stateful ? "TCP evidence" : "stateless protection"),
+        kpi("Consecutive", fmtInt(detection && detection.consecutive), "windows above threshold"),
         kpi("Sources", fmtInt(liveSources), fmtInt(profile && profile.trusted_count) + " trusted"),
         kpi("Alerts", fmtInt(alertCount), fmtInt(actions.length) + " mitigation actions"),
       ),
@@ -740,14 +725,13 @@
         fmtNumber(reputation.trust, 1),
         reputation.manual ? badge("manual", "info") : badge("earned", "muted"),
         fmtInt(reputation.syn) + " / " + fmtInt(reputation.ack),
-        fmtInt(reputation.handshakes),
         timeNode(reputation.last_seen),
       ],
       onClick: () => { location.hash = "#/destination/" + encodeURIComponent(reputation.destination); },
     }));
     const reputationTable = table([
       "Destination", "Source", { label: "Trust", class: "numeric" }, "Mode",
-      { label: "SYN / ACK", class: "numeric" }, { label: "Handshakes", class: "numeric" }, "Last seen",
+      { label: "SYN / ACK", class: "numeric" }, "Last seen",
     ], reputationRows, { compact: true, empty: "No source reputation records yet." });
     const manualRows = manual.map((item) => ({
       cells: [
@@ -760,7 +744,6 @@
     }));
     const manualTable = table(["Destination", "Source", "Trust", "Activity", "Last seen"], manualRows, { compact: true, empty: "No manual trust decisions." });
     const paramsPairs = [
-      ["Protection", params.stateful ? "stateful" : "stateless"],
       ["Threshold", fmtNumber(params.threshold, 1)],
       ["Persistence", params.persistence + " windows"],
       ["PPS floor", fmtPPS(params.pps_floor)],
@@ -768,11 +751,10 @@
       ["Warm-up windows", params.warmup_windows],
       ["Rate window", params.rate_window_seconds + " seconds"],
       ["Cooldown", fmtDuration(params.cooldown_seconds)],
-      ["FTP checks", params.ftp_enabled ? "enabled" : "disabled"],
     ];
     const view = el("div", {},
       el("div", { class: "view-top" },
-        el("div", { class: "view-lede", text: "Learning is durable. Source TrustScore is contextual to a destination, earned from plausible behavior and handshakes, and can be overridden by an operator. Hot distributions are bounded and expire; these facts persist." }),
+        el("div", { class: "view-lede", text: "Learning is durable. Source TrustScore is contextual to a destination, earned from plausible sampled behavior, and can be overridden by an operator. Hot distributions are bounded and expire; these facts persist." }),
         el("div", { class: "view-actions" }, refreshButton()),
       ),
       el("div", { class: "grid-kpi" },
@@ -784,8 +766,8 @@
       el("div", { class: "grid-2" },
         card("Detection parameters", "Explicit configuration values", kvList(paramsPairs)),
         card("Learning model", "Why a source is trusted", el("div", {},
-          el("p", { class: "card-note", text: "Trust starts with a small initial credit, grows slowly for active days, completed handshakes, and long sessions, and decays when a source is absent. A manual decision is an explicit operator override. Trust lowers suspicion; it never bypasses the blocklist." }),
-          chips(["initial credit", "active-day credit", "handshake credit", "long-session credit", "daily decay", "manual override"]),
+          el("p", { class: "card-note", text: "Trust starts with a small initial credit and grows slowly for active days and balanced SYN/ACK behaviour in the samples, then decays when a source is absent. A manual decision is an explicit operator override. Trust lowers suspicion; it never bypasses the blocklist." }),
+          chips(["initial credit", "active-day credit", "sampled ACK milestones", "daily decay", "manual override"]),
         )),
       ),
       el("div", { class: "section-gap" }),
@@ -990,52 +972,6 @@
 
   D.registerLoader("inspector", loadInspector);
 
-  async function loadConnections(route, token) {
-    const data = await apiGet("/api/connections");
-    if (token !== D.state.token) return;
-    const stateful = data.stateful !== false;
-    const stats = data.stats || {};
-    const connections = stateful ? (data.connections || []) : [];
-    const rows = connections.map((connection) => ({
-      cells: [
-        el("span", { class: "cell-mono", text: connection.source }),
-        el("span", { class: "cell-mono", text: connection.destination }),
-        badge("TCP", "blue"),
-        connection.source_port + " → " + connection.dest_port,
-        badge(connection.state || "unknown", connection.state === "established" ? "good" : "muted"),
-        fmtNumber(connection.duration_seconds, 1) + "s",
-        fmtInt(connection.packets),
-        fmtBytes(connection.bytes),
-        timeNode(connection.last_seen),
-      ],
-    }));
-    const connTable = table([
-      "Source", "Destination", "Protocol", "Ports", "State", { label: "Duration", class: "numeric" },
-      { label: "Packets", class: "numeric" }, { label: "Bytes", class: "numeric" }, "Last seen",
-    ], rows, { compact: true, empty: stateful ? "No established TCP sessions inferred from the current sample stream." : "Stateful protection is disabled; the sensor is not tracking connections." });
-    const view = el("div", {},
-      el("div", { class: "view-top" },
-        el("div", { class: "view-lede", text: "A best-effort view of plausible TCP conversations. Sampling frequently misses handshakes, so an empty table or an incomplete handshake is not proof of malicious traffic." }),
-        el("div", { class: "view-actions" }, refreshButton()),
-      ),
-      stateful ? null : el("div", { class: "banner banner-info" }, el("strong", { text: "Stateless protection. " }), "detection.stateful is false (the default), so the sensor keeps no connection table. Out-of-state TCP evidence, handshake trust, and this view are inactive. Detection still uses sampled rates, protocol and SYN mixes, reputation, blocklists, and application rules."),
-      el("div", { class: "grid-kpi" },
-        kpi("Protection", stateful ? "stateful" : "stateless", stateful ? "TCP session tracking" : "no connection table", { variant: stateful ? "good" : "warn" }),
-        kpi("Established", fmtInt(stats.established), "sessions", { variant: "good" }),
-        kpi("Pending", fmtInt(stats.pending), "handshakes in progress"),
-        kpi("Tracked", fmtInt(stats.tracked), "bounded session table"),
-        kpi("Out of state", fmtInt(stats.out_of_state), "samples inconsistent with state"),
-        kpi("Evicted", fmtInt(stats.evicted), "capacity pressure"),
-        kpi("Total seen", fmtInt(stats.total_seen), "packets evaluated"),
-      ),
-      card("Established sessions", "Inferred from sampled TCP traffic; not a full connection table", tableWrap(connTable.table, "table-scroll-short")),
-    );
-    if (!mount(token, view)) return;
-    D.state.viewHooks = { autoRefresh: 6 };
-  }
-
-  D.registerLoader("connections", loadConnections);
-
   async function loadBlocklist(route, token) {
     const [info, trust] = await Promise.all([apiGet("/api/blocklist"), apiGet("/api/trust")]);
     if (token !== D.state.token) return;
@@ -1049,7 +985,7 @@
         el("span", { class: "cell-mono", text: item.source }),
         badge(item.manual ? "manual" : "earned", item.manual ? "info" : "muted"),
         fmtNumber(item.trust, 1),
-        fmtInt(item.handshakes),
+        fmtInt(item.active_days) + " active days",
         timeNode(item.last_seen),
         el("div", { class: "inline-actions" },
           button("Revoke", {
@@ -1069,7 +1005,7 @@
         ),
       ],
     }));
-    const trustTable = table(["Destination", "Source", "Kind", { label: "Trust", class: "numeric" }, { label: "Handshakes", class: "numeric" }, "Last seen", "Actions"], trustedRows, {
+    const trustTable = table(["Destination", "Source", "Kind", { label: "Trust", class: "numeric" }, "Activity", "Last seen", "Actions"], trustedRows, {
       compact: true,
       empty: "No manual trust decisions. Earning trust through good behaviour is separate from a manual exemption.",
     });
@@ -1310,6 +1246,11 @@
       const lenRange = range(match.packet_length_min, match.packet_length_max, "B");
       if (lenRange) secondary.push(lenRange);
     }
+    if (match.payload_length) secondary.push("payload " + match.payload_length + "B");
+    else {
+      const payloadRange = range(match.payload_length_min, match.payload_length_max, "B payload");
+      if (payloadRange) secondary.push(payloadRange);
+    }
     if (match.fragment) secondary.push("fragmented only");
     if (match.direction) secondary.push(match.direction);
     return el("div", {},
@@ -1322,6 +1263,7 @@
     if (rule.mode === "standing") return el("span", { class: "muted", text: "always active" });
     const condition = rule.condition || {};
     const parts = [];
+    if (condition.per_source) parts.push("per source");
     if (condition.min_pps) parts.push("≥ " + fmtPPS(condition.min_pps));
     if (condition.min_bps) parts.push("≥ " + fmtBPS(condition.min_bps));
     if (condition.min_packets) parts.push("≥ " + fmtInt(condition.min_packets) + " sampled packets");
@@ -1331,9 +1273,10 @@
     if (payload) parts.push(payload);
     const window = condition.window_seconds ? "in " + condition.window_seconds + "s" : "";
     const consecutive = condition.consecutive > 1 ? "for " + condition.consecutive + " windows" : "";
+    const perSourceNote = condition.per_source ? "windows, persistence, and cooldowns per source" : "";
     return el("div", {},
       el("div", { text: parts.length ? parts.join(" and ") : "—" }),
-      el("div", { class: "cell-secondary", text: [window, consecutive, condition.cooldown_seconds ? "cooldown " + fmtDuration(condition.cooldown_seconds) : ""].filter(Boolean).join(" · ") || "immediate on match" }),
+      el("div", { class: "cell-secondary", text: [window, consecutive, perSourceNote, condition.cooldown_seconds ? "cooldown " + fmtDuration(condition.cooldown_seconds) : ""].filter(Boolean).join(" · ") || "immediate on match" }),
     );
   }
 
@@ -1343,7 +1286,11 @@
     if (action.type === "rate-limit") secondary.push(fmtBPS(action.rate_limit_bps || 0) + " cap");
     if (action.type === "allow") secondary.push("local bypass only");
     if (action.duration_seconds) secondary.push(fmtDuration(action.duration_seconds));
-    secondary.push(action.scope === "flow" ? "observed conversation" : "rule header");
+    secondary.push(
+      action.scope === "flow" ? "observed conversation"
+        : action.scope === "source" ? "triggering source"
+          : "rule header",
+    );
     return el("div", {},
       el("div", {}, badge(action.type || "—", ruleActionKind(action.type))),
       el("div", { class: "cell-secondary", text: secondary.join(" · ") }),
@@ -1503,6 +1450,9 @@
     const packetLengthInput = ruleNumberInput(match.packet_length, "1", "0 = any", 0, 65535);
     const packetLengthMinInput = ruleNumberInput(match.packet_length_min, "1", "min", 0, 65535);
     const packetLengthMaxInput = ruleNumberInput(match.packet_length_max, "1", "max", 0, 65535);
+    const payloadLengthInput = ruleNumberInput(match.payload_length, "1", "0 = any", 0, 65535);
+    const payloadLengthMinInput = ruleNumberInput(match.payload_length_min, "1", "min", 0, 65535);
+    const payloadLengthMaxInput = ruleNumberInput(match.payload_length_max, "1", "max", 0, 65535);
     const fragmentInput = el("input", { type: "checkbox", checked: Boolean(match.fragment) });
     const directionSelect = ruleSelect([["", "Any direction"], ["inbound", "Inbound"], ["internal", "Internal"]], match.direction || "");
 
@@ -1522,6 +1472,7 @@
     const minSourcesInput = ruleNumberInput(condition.min_sources, "1", "distinct sources", 0, 65535);
     const consecutiveInput = ruleNumberInput(condition.consecutive || 1, "1", "1", 1, 60);
     const cooldownInput = ruleNumberInput(condition.cooldown_seconds, "1", "0 = none");
+    const perSourceInput = el("input", { type: "checkbox", checked: Boolean(condition.per_source) });
     const payloadModeSelect = ruleSelect([
       ["none", "No payload condition"],
       ["contains", "Payload contains pattern"],
@@ -1542,7 +1493,7 @@
     ], action.type || "allow");
     const rateLimitInput = ruleNumberInput(action.rate_limit_bps, "any", defaults.rate_limit_bps ? String(defaults.rate_limit_bps) + " (default)" : "bits per second");
     const durationInput = ruleNumberInput(action.duration_seconds, "1", defaults.duration_seconds ? String(defaults.duration_seconds) + " (default)" : "seconds");
-    const scopeSelect = ruleSelect([["rule", "Rule header"], ["flow", "Observed conversation"]], action.scope || "rule");
+    const scopeSelect = ruleSelect([["rule", "Rule header"], ["flow", "Observed conversation"], ["source", "Triggering source"]], action.scope || "rule");
 
     const conditionSection = ruleSection("Trigger conditions", "Evaluated only for conditional rules against sampled observations.",
       el("div", { class: "form-grid" },
@@ -1554,6 +1505,11 @@
         ruleField("Minimum distinct sources", minSourcesInput, "Distributed-attack guard; requires an empty source prefix. Sampling bounds what can be counted."),
         ruleField("Consecutive windows", consecutiveInput, "Threshold must hold repeatedly."),
         ruleField("Cooldown (seconds)", cooldownInput, "Suppress repeat triggers after a fire."),
+        el("div", { class: "form-field" },
+          el("label", { text: "Judgement scope" }),
+          el("label", { class: "checkbox-line" }, perSourceInput, "Judge each source address separately"),
+          el("div", { class: "form-hint", text: "Per-source: is any single source exceeding this? Windows, persistence, cooldowns, and enforcement become per source; needs a volume threshold and an empty source prefix." }),
+        ),
       ),
       el("div", { class: "form-grid form-grid-top" },
         ruleField("Payload condition", payloadModeSelect, "Payload is sampled and capped at the capture budget (512 bytes)."),
@@ -1682,16 +1638,21 @@
         outCondition.min_sources = clampInt(minSourcesInput.value, 0, 65535);
         outCondition.consecutive = clampInt(consecutiveInput.value, 1, 60);
         outCondition.cooldown_seconds = clampInt(cooldownInput.value, 0, 86400);
+        outCondition.per_source = perSourceInput.checked;
       }
       const outAction = { type: actionTypeSelect.value, scope: "rule" };
       if (outAction.type === "rate-limit") outAction.rate_limit_bps = Math.trunc(ruleNumber(rateLimitInput.value));
       if (outAction.type !== "allow") outAction.duration_seconds = clampInt(durationInput.value, 0, 86400);
-      if (mode === "conditional" && outAction.type !== "allow") outAction.scope = scopeSelect.value;
+      if (mode === "conditional" && outAction.type !== "allow") {
+        outAction.scope = scopeSelect.value;
+        if (outCondition.per_source && outAction.scope === "rule") outAction.scope = "source";
+      }
       return {
         name: nameInput.value.trim(),
         description: descriptionInput.value.trim(),
         enabled: enabledInput.checked,
         mode: mode,
+        pack: candidate.pack || "",
         match: {
           destination: destinationInput.value.trim(),
           source: sourceInput.value.trim(),
@@ -1706,6 +1667,9 @@
           packet_length: clampInt(packetLengthInput.value, 0, 65535),
           packet_length_min: clampInt(packetLengthMinInput.value, 0, 65535),
           packet_length_max: clampInt(packetLengthMaxInput.value, 0, 65535),
+          payload_length: clampInt(payloadLengthInput.value, 0, 65535),
+          payload_length_min: clampInt(payloadLengthMinInput.value, 0, 65535),
+          payload_length_max: clampInt(payloadLengthMaxInput.value, 0, 65535),
           fragment: fragmentInput.checked,
           direction: directionSelect.value,
         },
@@ -1731,6 +1695,11 @@
         return "Conditional allow is not supported. Use a standing allow rule or choose a different action.";
       }
       const m = candidateRule.match;
+      const c = candidateRule.condition || {};
+      if (m.destination === "@protected") {
+        if (candidateRule.mode !== "conditional") return "The @protected wildcard is only valid for conditional rules.";
+        if (candidateRule.action.scope === "rule") return "The @protected wildcard needs flow or source enforcement scope; there is no concrete prefix to announce.";
+      }
       if (m.src_port && (m.src_port_min || m.src_port_max)) {
         return "Source port cannot be both an exact value and a range.";
       }
@@ -1740,14 +1709,27 @@
       if (m.packet_length && (m.packet_length_min || m.packet_length_max)) {
         return "Packet length cannot be both an exact value and a range.";
       }
-      if (m.src_port_min > m.src_port_max || m.dst_port_min > m.dst_port_max || m.packet_length_min > m.packet_length_max) {
+      if (m.payload_length && (m.payload_length_min || m.payload_length_max)) {
+        return "Payload length cannot be both an exact value and a range.";
+      }
+      if (m.src_port_min > m.src_port_max || m.dst_port_min > m.dst_port_max || m.packet_length_min > m.packet_length_max || m.payload_length_min > m.payload_length_max) {
         return "Range minimum must not exceed its maximum.";
       }
       if ((m.src_port_min || m.dst_port_min) && m.protocol !== 6 && m.protocol !== 17) {
         return "Port ranges need protocol TCP or UDP.";
       }
-      if (candidateRule.mode === "conditional" && candidateRule.condition.min_sources > 0 && candidateRule.match.source) {
+      if (candidateRule.mode === "conditional" && c.min_sources > 0 && m.source) {
         return "Minimum distinct sources requires an empty source prefix.";
+      }
+      if (candidateRule.mode === "conditional" && c.per_source) {
+        if (m.source) return "Per-source judgement requires an empty source prefix.";
+        if (c.min_sources > 0) return "Per-source judgement cannot be combined with a minimum distinct-sources count.";
+        if (c.payload.mode === "absent_first_n" || c.payload.mode === "present_first_n") {
+          return "Per-source judgement cannot be combined with first-N payload conditions.";
+        }
+        if (!c.min_pps && !c.min_bps && !c.min_packets && !c.min_bytes) {
+          return "Per-source judgement needs at least one volume threshold (PPS, BPS, packets, or bytes).";
+        }
       }
       return "";
     }
@@ -1757,7 +1739,7 @@
       const payloadRule = collectRule();
       let problem = validateLocal(payloadRule);
       if (!problem && payloadRule.mode === "conditional" && payloadRule.action.type === "discard" &&
-          payloadRule.action.scope !== "flow" && !payloadRule.match.source) {
+          payloadRule.action.scope !== "flow" && payloadRule.action.scope !== "source" && !payloadRule.match.source) {
         // The server refuses rule-scoped destination-only discards; surface that
         // constraint before the round trip so the operator can fix it locally.
         payloadRule.match.source = "198.51.100.0/24";
@@ -1830,7 +1812,7 @@
       ),
       ruleSection("Header match", "Destination is required. Flowspec enforces these header fields; ranges are inclusive.",
         el("div", { class: "form-grid" },
-          ruleField("Destination prefix", destinationInput, "Must be fully inside an explicitly protected prefix. Default routes are refused.", "span-2"),
+          ruleField("Destination prefix", destinationInput, "A prefix fully inside protected space, or @protected to cover every protected destination (conditional rules only). Default routes are refused.", "span-2"),
           ruleField("Source prefix", sourceInput, "Optional. Refused if it overlaps protected space.", "span-2"),
           ruleField("Protocol", protocolInput, "0 = any · 6 TCP · 17 UDP · 1 ICMP."),
           ruleField("Direction", directionSelect),
@@ -1851,6 +1833,12 @@
             el("label", { text: "Packet length range (bytes)" }),
             el("div", { class: "range-pair" }, packetLengthMinInput, el("span", { class: "range-sep", text: "–" }), packetLengthMaxInput),
             el("div", { class: "form-hint", text: "Inclusive min–max bytes; e.g. 64–128 to match small packets." }),
+          ),
+          ruleField("Payload length (exact)", payloadLengthInput, "Captured payload bytes of the sampled packet; 0 = any. Judged on samples, enforced as a header match."),
+          el("div", { class: "form-field" },
+            el("label", { text: "Payload length range (bytes)" }),
+            el("div", { class: "range-pair" }, payloadLengthMinInput, el("span", { class: "range-sep", text: "–" }), payloadLengthMaxInput),
+            el("div", { class: "form-hint", text: "Bounded by the sampler capture budget; heavy truncation weakens high limits." }),
           ),
           el("div", { class: "form-field" },
             el("label", { text: "Fragmentation" }),
@@ -2029,6 +2017,7 @@
           ),
           el("div", {},
             badge(rule.mode, rule.mode === "standing" ? "accent" : "blue"),
+            rule.pack ? el("div", { class: "cell-secondary" }, badge("pack: " + rule.pack, "muted")) : null,
             !rule.enabled ? el("div", { class: "cell-secondary", text: "disabled" }) : null,
           ),
           ruleMatchSummaryNode(rule),
@@ -2081,6 +2070,78 @@
       ["Save error", save.error ? badge(save.error, "danger") : badge("clean", "good")],
     ];
 
+    // Rule packs: application knowledge imported as data instead of code.
+    // Built-in packs ship inside the binary; custom .dly documents can be
+    // pasted and imported the same way. Importing copies validated rules
+    // into the catalog; re-importing the same pack is a no-op.
+    const packs = data.packs || [];
+    const importedPackCount = (name) => rules.filter((rule) => (rule.pack || "").toLowerCase() === name.toLowerCase()).length;
+    const packList = packs.map((pack) => {
+      const existing = importedPackCount(pack.name);
+      const importButton = button(existing ? "Re-import" : "Import", {
+        small: true,
+        variant: existing ? "ghost" : "primary",
+        onClick: async () => {
+          importButton.disabled = true;
+          importButton.textContent = "Importing…";
+          try {
+            const result = await mutate("/api/rules/packs/" + encodeURIComponent(pack.name) + "/import", "POST");
+            const count = result.result ? result.result.imported.length : 0;
+            const skipped = result.result && result.result.skipped ? result.result.skipped.length : 0;
+            toast("Pack " + (count ? "imported" : "unchanged"), pack.name + ": " + fmtInt(count) + " rules imported" + (skipped ? ", " + fmtInt(skipped) + " already present" : ""), count ? "good" : "info");
+            D.refreshCurrent();
+          } catch (error) {
+            toast("Pack import failed", error.message, "error");
+            importButton.disabled = false;
+            importButton.textContent = existing ? "Re-import" : "Import";
+          }
+        },
+      });
+      return el("div", { class: "pack-entry" },
+        el("div", { class: "pack-head" },
+          el("strong", { text: pack.name }),
+          el("span", { class: "muted", text: "v" + (pack.version || 1) + " · " + fmtInt(pack.rule_count) + " rules" }),
+          existing ? badge(existing + " in catalog", "good") : badge("not imported", "muted"),
+          importButton,
+        ),
+        pack.description ? el("div", { class: "cell-secondary", text: pack.description }) : null,
+      );
+    });
+    const packPasteInput = el("textarea", {
+      class: "input", rows: "5", spellcheck: "false",
+      placeholder: '{\n  "name": "My application pack",\n  "version": 1,\n  "description": "…",\n  "rules": [ { "name": "…", "mode": "conditional", "match": { "destination": "@protected", … }, "condition": { "per_source": true, … }, "action": { … } } ]\n}',
+    });
+    const packImportButton = button("Import custom pack", {
+      onClick: async () => {
+        const text = packPasteInput.value.trim();
+        if (!text) {
+          toast("Nothing to import", "Paste a .dly pack document first.", "error");
+          return;
+        }
+        let document_ = null;
+        try {
+          document_ = JSON.parse(text);
+        } catch (error) {
+          toast("Invalid pack JSON", error.message, "error");
+          return;
+        }
+        packImportButton.disabled = true;
+        packImportButton.textContent = "Importing…";
+        try {
+          const result = await mutate("/api/rules/packs", "POST", document_);
+          const count = result.result ? result.result.imported.length : 0;
+          const skipped = result.result && result.result.skipped ? result.result.skipped.length : 0;
+          toast("Pack imported", fmtInt(count) + " rules created" + (skipped ? ", " + fmtInt(skipped) + " already present" : ""), count ? "good" : "info");
+          packPasteInput.value = "";
+          D.refreshCurrent();
+        } catch (error) {
+          toast("Pack import failed", error.message, "error");
+          packImportButton.disabled = false;
+          packImportButton.textContent = "Import custom pack";
+        }
+      },
+    });
+
     const view = el("div", {},
       el("div", { class: "view-top" },
         el("div", { class: "view-lede", text: "Rules are evaluated top to bottom: drag rows (or use the arrows) to set the order — the sequence is persisted. Rules survive restarts and reconcile standing actions on startup, reconnect, and every maintenance tick. Conditions are evaluated on sampled sFlow observations; enforcement is a BGP Flowspec header match, not inline packet inspection." }),
@@ -2105,7 +2166,9 @@
           card("Semantics and guardrails", "What a rule can and cannot do", el("ul", { class: "signal-list" },
             el("li", { text: "Standing rules apply their rule-header action until disabled or deleted, and are replayed after BGP reconnects." }),
             el("li", { text: "Conditional rules trigger temporary, rule-owned actions; volume conditions use rule scope by default." }),
-            el("li", { text: "Payload and first-N conditions are evaluated on sampled packets only; the resulting enforcement is header-based." }),
+            el("li", { text: "Per-source conditions judge each source address separately and enforce against the triggering source only." }),
+            el("li", { text: "Payload, payload-length, and first-N conditions are evaluated on sampled packets only; the resulting enforcement is header-based." }),
+            el("li", { text: "The @protected destination matches any protected prefix; it needs flow or source enforcement scope." }),
             el("li", { text: "Allow is a local bypass of automatic mitigation, never a BGP permit or override of network policy." }),
             el("li", { text: "Destination must be inside a protected prefix; default routes and protected sources are refused." }),
             el("li", { text: "Destination-only discard requires explicit configuration; the default is refusal." }),
@@ -2113,6 +2176,14 @@
         ),
         el("div", { class: "stack" },
           card("Catalog summary", "Runtime counters and configured bounds", kvList(summaryPairs)),
+          card("Rule packs", "Application rules as data (.dly)", el("div", { class: "stack" },
+            packList.length ? el("div", { class: "stack" }, packList) : el("div", { class: "cell-secondary", text: "No built-in packs available." }),
+            el("div", { class: "form-hint", text: "Packs are templates: importing copies their rules into your catalog, where they are ordinary rules — edit, disable, or delete them freely. A pack's destination is @protected, so it covers every protected prefix and enforces per triggering source. Re-importing skips rules that already exist." }),
+            el("div", { class: "form-section-title", text: "Import a custom pack" }),
+            packPasteInput,
+            packImportButton,
+            el("div", { class: "form-hint", text: "Paste a .dly document (JSON). Rules are validated against your protected prefixes before anything is created; an invalid pack is rejected wholesale." }),
+          )),
           card("Persistence", "Atomic writes; statistics survive restarts", kvList(savePairs)),
         ),
       ),
@@ -2129,7 +2200,6 @@
     D.applyHeader(status);
     const cfg = settings.config || {};
     const detection = cfg.detection || {};
-    const stateful = detection.stateful !== false;
     const mitigation = cfg.mitigation || {};
     const collector = cfg.collector || {};
     const dashboard = cfg.dashboard || {};
@@ -2137,7 +2207,6 @@
     const alerting = cfg.alerting || {};
     const persistence = cfg.persistence || {};
     const memory = cfg.memory || {};
-    const ftp = (cfg.protocols || {}).ftp || {};
     const warnings = settings.warnings || [];
     const testButton = button("Send test notification", {
       variant: "primary",
@@ -2165,13 +2234,11 @@
       ["Auto-block", mitigation.auto_block ? "enabled" : "disabled"],
     ];
     const detectionPairs = [
-      ["Protection", detection.stateful ? "stateful" : "stateless"],
       ["Evaluation interval", detection.evaluation_interval || "—"],
       ["Rate window", (detection.rate_window_seconds || 0) + " seconds"],
       ["Cooldown", detection.cooldown || "—"],
       ["Warm-up windows", detection.warmup_windows],
       ["Trust exemption score", fmtNumber(detection.trust_exemption_score, 1)],
-      ["Out-of-state minimum", detection.stateful ? fmtPPS(detection.out_of_state_min_pps) : "not used (stateless)"],
       ["Threat threshold", fmtNumber(detection.threshold, 1)],
       ["Persistence", (detection.persistence || 0) + " windows"],
       ["PPS floor", fmtPPS(detection.pps_floor)],
@@ -2185,7 +2252,6 @@
       ["Max active", mitigation.max_active],
       ["Rate limit", fmtBPS(Number(mitigation.rate_limit_mbps || 0) * 1e6)],
       ["History limit", mitigation.history_limit],
-      ["FTP block duration", ftp.block_duration || "—"],
     ];
     const bgpPairs = [
       ["Enabled", bgp.enabled ? "yes" : "no"],
@@ -2209,20 +2275,8 @@
       ["Alert history", fmtInt(memory.alert_history) + " records"],
       ["Destination stats TTL", memory.destination_stats_ttl || "—"],
       ["Baseline TTL", memory.baseline_ttl || "—"],
-      ["TCP session TTL", stateful ? (memory.tcp_session_ttl || "—") : "not used (stateless)"],
-      ["TCP pending TTL", stateful ? (memory.tcp_pending_ttl || "—") : "not used (stateless)"],
-      ["Max TCP sessions", stateful ? fmtInt(memory.max_tcp_sessions) : "not used (stateless)"],
-      ["FTP state TTL", memory.ftp_state_ttl || "—"],
       ["Profile file", persistence.profile_file || "—"],
       ["Save interval", persistence.save_interval || "—"],
-    ];
-    const ftpPairs = [
-      ["Enabled", ftp.enabled ? "yes" : "no"],
-      ["Control rate", fmtPPS(ftp.control_rate_limit_pps)],
-      ["Data rate", fmtPPS(ftp.data_rate_limit_pps)],
-      ["Exempt trust", fmtNumber(ftp.exempt_trust_score, 1)],
-      ["Max command bytes", fmtInt(ftp.max_command_bytes)],
-      ["Block duration", ftp.block_duration || "—"],
     ];
     const view = el("div", {},
       simBanner(status),
@@ -2253,7 +2307,6 @@
         card("Mitigation", "Bounds and lifecycle", kvList(mitigationPairs)),
         card("BGP", "No password is used; for local lab peers only unless protected by network policy", kvList(bgpPairs)),
         card("Alerting", "Webhook URL is redacted", kvList(alertPairs)),
-        card("FTP inspection", "Application-layer checks", kvList(ftpPairs)),
         card("Memory & persistence", "Bounded, atomic, restart-safe", kvList(memoryPairs)),
       ),
     );

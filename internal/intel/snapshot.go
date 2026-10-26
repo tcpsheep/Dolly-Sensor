@@ -43,7 +43,6 @@ type SourceSnapshot struct {
 	FirstSeen  time.Time    `json:"first_seen"`
 	LastSeen   time.Time    `json:"last_seen"`
 	ActiveDays int          `json:"active_days"`
-	Handshakes uint64       `json:"handshakes"`
 	SYN        uint64       `json:"syn"`
 	ACK        uint64       `json:"ack"`
 	PSH        uint64       `json:"psh"`
@@ -62,7 +61,6 @@ type TrustedSource struct {
 	FirstSeen   time.Time    `json:"first_seen"`
 	LastSeen    time.Time    `json:"last_seen"`
 	ActiveDays  int          `json:"active_days"`
-	Handshakes  uint64       `json:"handshakes"`
 	History     []TrustEvent `json:"history"`
 }
 
@@ -73,7 +71,6 @@ type ReputationSummary struct {
 	Trust       float64   `json:"trust"`
 	Manual      bool      `json:"manual"`
 	LastSeen    time.Time `json:"last_seen"`
-	Handshakes  uint64    `json:"handshakes"`
 	SYN         uint64    `json:"syn"`
 	ACK         uint64    `json:"ack"`
 }
@@ -175,7 +172,6 @@ func sourceSnapshots(sources map[string]*Reputation, limit int) []SourceSnapshot
 			FirstSeen:  rep.FirstSeen,
 			LastSeen:   rep.LastSeen,
 			ActiveDays: len(rep.ActiveDays),
-			Handshakes: rep.Handshakes,
 			SYN:        rep.SYN,
 			ACK:        rep.ACK,
 			PSH:        rep.PSH,
@@ -214,7 +210,6 @@ func (s *Store) ManualTrust() []TrustedSource {
 				FirstSeen:   rep.FirstSeen,
 				LastSeen:    rep.LastSeen,
 				ActiveDays:  len(rep.ActiveDays),
-				Handshakes:  rep.Handshakes,
 				History:     append([]TrustEvent(nil), rep.History...),
 			})
 		}
@@ -241,7 +236,6 @@ func (s *Store) Reputations(limit int) []ReputationSummary {
 				Trust:       rep.Trust(),
 				Manual:      rep.Manual,
 				LastSeen:    rep.LastSeen,
-				Handshakes:  rep.Handshakes,
 				SYN:         rep.SYN,
 				ACK:         rep.ACK,
 			})

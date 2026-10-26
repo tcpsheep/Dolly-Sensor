@@ -15,6 +15,12 @@ import (
 
 const bucketCount = 61
 
+// maxSourceStates bounds how many distinct sources one per-source rule
+// tracks. Per-source conditions target single abusive clients, not
+// distributed floods; beyond this many sources the rule simply stops
+// learning new addresses until the old ones expire.
+const maxSourceStates = 256
+
 type bucket struct {
 	second  int64
 	packets uint64
@@ -33,6 +39,53 @@ func (b *bucket) addSource(addr netip.Addr) {
 	}
 }
 
+type sourceBucket struct {
+	second  int64
+	packets uint64
+	bytes   uint64
+}
+
+// sourceState is the per-source window for a per-source rule. Each tracked
+// source has its own rate history, persistence counter, cooldown, and last
+// matching observation, so one abusive client can trigger mitigation without
+// implicating the others.
+type sourceState struct {
+	buckets         [bucketCount]sourceBucket
+	last            time.Time
+	above           int
+	nextEligible    time.Time
+	lastObservation *model.Observation
+}
+
+func (st *sourceState) add(now time.Time, packets, bytes uint64) {
+	second := now.Unix()
+	index := int(second % int64(len(st.buckets)))
+	if st.buckets[index].second != second {
+		st.buckets[index] = sourceBucket{second: second}
+	}
+	st.buckets[index].packets += packets
+	st.buckets[index].bytes += bytes
+}
+
+func (st *sourceState) windowTotals(now time.Time, seconds int) (packets, bytes uint64) {
+	if seconds < 1 {
+		seconds = 1
+	}
+	if seconds > 60 {
+		seconds = 60
+	}
+	cutoff := now.Unix() - int64(seconds) + 1
+	nowSecond := now.Unix()
+	for i := range st.buckets {
+		entry := &st.buckets[i]
+		if entry.second >= cutoff && entry.second <= nowSecond {
+			packets += entry.packets
+			bytes += entry.bytes
+		}
+	}
+	return packets, bytes
+}
+
 type flowState struct {
 	seen     int
 	found    bool
@@ -46,6 +99,7 @@ type runtime struct {
 	above           int
 	nextEligible    time.Time
 	flows           map[string]*flowState
+	sourceStates    map[netip.Addr]*sourceState
 	lastObservation *model.Observation
 	actionID        string
 	actionStatus    string
@@ -61,7 +115,10 @@ type runtime struct {
 }
 
 func newRuntime(stats Stats) *runtime {
-	rt := &runtime{flows: map[string]*flowState{}}
+	rt := &runtime{
+		flows:        map[string]*flowState{},
+		sourceStates: map[netip.Addr]*sourceState{},
+	}
 	rt.hits.Store(stats.Hits)
 	rt.matchedPackets.Store(stats.MatchedPackets)
 	rt.matchedBytes.Store(stats.MatchedBytes)
@@ -82,6 +139,7 @@ func (rt *runtime) resetForRuleChange(now time.Time) {
 	rt.above = 0
 	rt.nextEligible = time.Time{}
 	rt.flows = map[string]*flowState{}
+	rt.sourceStates = map[netip.Addr]*sourceState{}
 	rt.lastObservation = nil
 	rt.actionID = ""
 	rt.actionStatus = ""
@@ -108,7 +166,7 @@ func (rt *runtime) snapshot(rule *Rule, now time.Time) Stats {
 	stats.ActionStatus = rt.actionStatus
 	stats.LastError = rt.lastError
 	nextEligible := rt.nextEligible
-	hasFlow := len(rt.flows) > 0
+	hasFlow := len(rt.flows) > 0 || len(rt.sourceStates) > 0
 	rt.mu.Unlock()
 	stats.State = stateForRule(*rule, stats, now, nextEligible, hasFlow)
 	return stats
@@ -249,6 +307,22 @@ func (s *Store) Observe(obs model.Observation, now time.Time) []Trigger {
 			continue
 		}
 		payload := rule.compiled.payload
+		if rule.Condition.PerSource {
+			// Per-source rules bucket their matching traffic per source
+			// address. Triggers are decided in Tick, per source.
+			switch rule.Condition.Payload.Mode {
+			case PayloadContains:
+				if payload == nil || !payload.matches(obs.Payload) {
+					continue
+				}
+				rt.recordMatch(obs, now, false)
+				rt.recordSourceMatch(obs, now, s.opts.FlowTTL)
+			default:
+				rt.recordMatch(obs, now, true)
+				rt.recordSourceMatch(obs, now, s.opts.FlowTTL)
+			}
+			continue
+		}
 		switch rule.Condition.Payload.Mode {
 		case PayloadNone:
 			rt.recordMatch(obs, now, true)
@@ -270,6 +344,122 @@ func (s *Store) Observe(obs model.Observation, now time.Time) []Trigger {
 			if trigger := s.observeFirstN(rule, rt, payload, obs, now); trigger != nil {
 				triggers = append(triggers, *trigger)
 			}
+		}
+	}
+	return triggers
+}
+
+// recordSourceMatch maintains the per-source windows of a per-source rule.
+// The source table is bounded and idle entries expire with the flow TTL.
+func (rt *runtime) recordSourceMatch(obs model.Observation, now time.Time, ttl time.Duration) {
+	packets := obs.EstimatedPackets
+	if packets == 0 {
+		packets = 1
+	}
+	bytes := obs.EstimatedBytes
+	src := obs.SrcIP.Unmap()
+	if !src.IsValid() {
+		return
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	st := rt.sourceStates[src]
+	if st == nil {
+		rt.cleanupSourceStatesLocked(now, ttl)
+		if len(rt.sourceStates) >= maxSourceStates {
+			return
+		}
+		st = &sourceState{last: now}
+		rt.sourceStates[src] = st
+	}
+	st.last = now
+	st.add(now, packets, bytes)
+	snapshot := cloneObservation(obs)
+	st.lastObservation = &snapshot
+}
+
+func (rt *runtime) cleanupSourceStatesLocked(now time.Time, ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	cutoff := now.Add(-ttl)
+	for addr, st := range rt.sourceStates {
+		if st.last.Before(cutoff) {
+			delete(rt.sourceStates, addr)
+		}
+	}
+}
+
+// triggerSourceLocked fires a per-source trigger and arms that source's
+// cooldown. Rule-level state is deliberately untouched: other sources keep
+// their own counters.
+func (rt *runtime) triggerSourceLocked(rule *Rule, st *sourceState, obs model.Observation, now time.Time, reason string, defaultDuration time.Duration) *Trigger {
+	if now.Before(st.nextEligible) {
+		return nil
+	}
+	duration := time.Duration(rule.Action.DurationSeconds) * time.Second
+	if duration <= 0 {
+		duration = defaultDuration
+	}
+	if duration <= 0 {
+		duration = time.Minute
+	}
+	cooldown := time.Duration(rule.Condition.CooldownSeconds) * time.Second
+	if cooldown < 0 {
+		cooldown = 0
+	}
+	st.nextEligible = now.Add(duration + cooldown)
+	st.above = 0
+	rt.triggers.Add(1)
+	rt.lastTrigger.Store(now.UnixNano())
+	copy := *rule
+	return &Trigger{
+		Rule:        copy,
+		At:          now,
+		Observation: cloneObservation(obs),
+		Reason:      reason,
+	}
+}
+
+// tickPerSource evaluates one per-source rule: every tracked source is judged
+// against the rule's thresholds over its own window, with its own
+// persistence counter and cooldown.
+func (s *Store) tickPerSource(rule *Rule, rt *runtime, now time.Time) []Trigger {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.cleanupSourceStatesLocked(now, s.opts.FlowTTL)
+	seconds := rule.Condition.WindowSeconds
+	var triggers []Trigger
+	for addr, st := range rt.sourceStates {
+		packets, bytes := st.windowTotals(now, seconds)
+		pps := float64(packets) / float64(seconds)
+		bps := float64(bytes) * 8 / float64(seconds)
+		met := true
+		if rule.Condition.MinPPS > 0 && pps < rule.Condition.MinPPS {
+			met = false
+		}
+		if rule.Condition.MinBPS > 0 && bps < rule.Condition.MinBPS {
+			met = false
+		}
+		if rule.Condition.MinPackets > 0 && packets < rule.Condition.MinPackets {
+			met = false
+		}
+		if rule.Condition.MinBytes > 0 && bytes < rule.Condition.MinBytes {
+			met = false
+		}
+		if !met {
+			st.above = 0
+			continue
+		}
+		st.above++
+		if st.above < rule.Condition.Consecutive || st.lastObservation == nil {
+			continue
+		}
+		obs := *st.lastObservation
+		reason := fmt.Sprintf("Source %s exceeded the per-source threshold: %.2f pps, %.2f bps, %d estimated packets, %d bytes over %ds.", addr, pps, bps, packets, bytes, seconds)
+		trigger := rt.triggerSourceLocked(rule, st, obs, now, reason, s.opts.DefaultDuration)
+		if trigger != nil {
+			triggers = append(triggers, *trigger)
 		}
 	}
 	return triggers
@@ -358,6 +548,12 @@ func (s *Store) Tick(now time.Time) []Trigger {
 	for _, item := range pairs {
 		rule := item.rule
 		rt := item.runtime
+		if rule.Condition.PerSource {
+			if found := s.tickPerSource(rule, rt, now); len(found) > 0 {
+				triggers = append(triggers, found...)
+			}
+			continue
+		}
 		rt.mu.Lock()
 		rt.cleanupFlowsLocked(now, s.opts.FlowTTL)
 		if now.Before(rt.nextEligible) {

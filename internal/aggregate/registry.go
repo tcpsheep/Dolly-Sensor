@@ -62,6 +62,7 @@ type Recent struct {
 	Bytes          uint64        `json:"bytes"`
 	Samples        uint64        `json:"samples"`
 	AvgPacketSize  float64       `json:"avg_packet_size"`
+	Malformed      uint64        `json:"malformed"`
 	Sources        []SourceCount `json:"sources"`
 	SourceCount    int           `json:"source_count"`
 	SourceOverflow uint64        `json:"source_overflow"`
@@ -145,6 +146,7 @@ type window struct {
 	bytes          uint64
 	samples        uint64
 	sizeSum        uint64
+	malformed      uint64
 	sources        map[netip.Addr]uint64
 	protocols      map[string]uint64
 	destPorts      map[uint16]uint64
@@ -243,6 +245,9 @@ func addToWindow(w *window, obs model.Observation, packets, bytes uint64) {
 	size := uint64(obs.PacketSize)
 	w.sizeSum += size * packets
 	w.sizes[sizeBucket(size)] += packets
+	if obs.Malformed() {
+		w.malformed += packets
+	}
 	protocol := obs.ProtocolName
 	if protocol == "" {
 		protocol = model.ProtocolName(obs.Protocol)
@@ -295,6 +300,7 @@ func mergeWindows(target *window, source window) {
 	target.bytes += source.bytes
 	target.samples += source.samples
 	target.sizeSum += source.sizeSum
+	target.malformed += source.malformed
 	target.sourceOverflow += source.sourceOverflow
 	for i := range target.sizes {
 		target.sizes[i] += source.sizes[i]
@@ -439,6 +445,7 @@ func buildRecent(w window) Recent {
 		Packets:        w.packets,
 		Bytes:          w.bytes,
 		Samples:        w.samples,
+		Malformed:      w.malformed,
 		SourceOverflow: w.sourceOverflow,
 		SourceCount:    len(w.sources),
 		Sources:        make([]SourceCount, 0, min(len(w.sources), 24)),

@@ -20,7 +20,6 @@ import (
 	"dollysensor/internal/mitigate"
 	"dollysensor/internal/model"
 	"dollysensor/internal/notify"
-	"dollysensor/internal/tcpstate"
 	"dollysensor/internal/version"
 )
 
@@ -42,7 +41,6 @@ type CollectorStatus struct {
 	DroppedDatagrams uint64    `json:"dropped_datagrams"`
 	DroppedFindings  uint64    `json:"dropped_findings"`
 	BlocklistHits    uint64    `json:"blocklist_hits"`
-	FTPFindings      uint64    `json:"ftp_findings"`
 	Evaluations      uint64    `json:"evaluations"`
 	LastPacket       time.Time `json:"last_packet,omitempty"`
 	LastEvaluation   time.Time `json:"last_evaluation,omitempty"`
@@ -66,7 +64,6 @@ type StatusData struct {
 	ProtectedCIDRs  []string          `json:"protected_cidrs"`
 	TrustedSources  []string          `json:"trusted_sources"`
 	Collector       CollectorStatus   `json:"collector"`
-	TCP             tcpstate.Stats    `json:"tcp"`
 	DestinationLive int               `json:"destination_live"`
 	Profiles        int               `json:"profiles"`
 	Alerts          alerts.Stats      `json:"alerts"`
@@ -97,7 +94,6 @@ type DestinationRow struct {
 	CurrentBPS     float64           `json:"current_bps"`
 	BaselinePPS    float64           `json:"baseline_pps"`
 	BaselineBPS    float64           `json:"baseline_bps"`
-	OutOfStatePPS  float64           `json:"out_of_state_pps"`
 	Sources        int               `json:"sources"`
 	TrustedSources int               `json:"trusted_sources"`
 	TotalPackets   uint64            `json:"total_packets"`
@@ -151,13 +147,6 @@ type PacketFilter struct {
 	Direction   string
 	Query       string
 	Limit       int
-}
-
-// ConnectionsData is the TCP session view.
-type ConnectionsData struct {
-	Stateful    bool                  `json:"stateful"`
-	Stats       tcpstate.Stats        `json:"stats"`
-	Connections []tcpstate.Connection `json:"connections"`
 }
 
 // SettingsData exposes effective settings with secrets removed.
@@ -216,7 +205,6 @@ func (s *Sensor) DestinationRows(limit int) []DestinationRow {
 			row.Attack = state.Attack
 			row.BaselinePPS = state.BaselinePPS
 			row.BaselineBPS = state.BaselineBPS
-			row.OutOfStatePPS = state.OutOfStatePPS
 		} else if row.Warmup {
 			row.Threat = "learning"
 		}
@@ -235,7 +223,6 @@ func (s *Sensor) DestinationRows(limit int) []DestinationRow {
 		row.Attack = state.Attack
 		row.BaselinePPS = state.BaselinePPS
 		row.BaselineBPS = state.BaselineBPS
-		row.OutOfStatePPS = state.OutOfStatePPS
 	}
 	out := make([]DestinationRow, 0, len(rows))
 	for _, row := range rows {
@@ -463,26 +450,6 @@ func (s *Sensor) manualTrustFor(dst netip.Addr) []intel.TrustedSource {
 	return out
 }
 
-// Connections returns live established TCP sessions.
-func (s *Sensor) Connections(limit int) ConnectionsData {
-	if limit <= 0 || limit > 2000 {
-		limit = 500
-	}
-	data := ConnectionsData{Stateful: s.cfg.Detection.Stateful}
-	if s.tcp != nil {
-		data.Stats = s.tcp.Stats()
-		data.Connections = s.tcp.Established(limit)
-	}
-	return data
-}
-
-func (s *Sensor) tcpStats() tcpstate.Stats {
-	if s.tcp == nil {
-		return tcpstate.Stats{}
-	}
-	return s.tcp.Stats()
-}
-
 // MitigationHistory returns recent mitigations, newest first.
 func (s *Sensor) MitigationHistory(limit int) []mitigate.Action {
 	if limit <= 0 || limit > 1000 {
@@ -616,14 +583,12 @@ func (s *Sensor) Status() StatusData {
 			DroppedDatagrams: s.counters.droppedDatagrams.Load(),
 			DroppedFindings:  s.counters.droppedFindings.Load(),
 			BlocklistHits:    s.counters.blocklistHits.Load(),
-			FTPFindings:      s.counters.ftpFindings.Load(),
 			Evaluations:      s.counters.evaluations.Load(),
 			LastPacket:       timeFromUnixNano(s.last.packet.Load()),
 			LastEvaluation:   timeFromUnixNano(s.lastEval.Load()),
 			PacketBuffer:     s.ring.Len(),
 			PacketBufferCap:  s.cfg.Memory.PacketBuffer,
 		},
-		TCP:             s.tcpStats(),
 		DestinationLive: s.aggregate.DestinationCount(),
 		Profiles:        s.intel.Count(),
 		Alerts:          s.alerts.Stats(),
