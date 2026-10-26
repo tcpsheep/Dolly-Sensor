@@ -33,8 +33,17 @@ func TestSafeDefaultsRequireExplicitProtectedNetworks(t *testing.T) {
 	if cfg.Mitigation.AutoBlock {
 		t.Fatal("automatic blocking must be opt-in")
 	}
-	if cfg.Detection.Sensitivity != "balanced" {
-		t.Fatalf("default sensitivity = %q", cfg.Detection.Sensitivity)
+	if !cfg.Detection.Stateful {
+		t.Fatal("TCP state tracking should be enabled by default")
+	}
+	if cfg.Detection.Threshold != DefaultThreatThreshold {
+		t.Fatalf("default threshold = %v", cfg.Detection.Threshold)
+	}
+	if cfg.Detection.Persistence != DefaultPersistence {
+		t.Fatalf("default persistence = %d", cfg.Detection.Persistence)
+	}
+	if cfg.Detection.PPSFloor != DefaultPPSFloor || cfg.Detection.BPSFloor != DefaultBPSFloor {
+		t.Fatalf("default floors = %v / %v", cfg.Detection.PPSFloor, cfg.Detection.BPSFloor)
 	}
 	warnings, err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "protected_cidrs") {
@@ -63,11 +72,67 @@ func TestLoadValidConfiguration(t *testing.T) {
 	if loaded.Detection.EvaluationInterval.Std() != 250*time.Millisecond {
 		t.Fatalf("duration = %v", loaded.Detection.EvaluationInterval.Std())
 	}
-	if loaded.Detection.Sensitivity != "balanced" {
-		t.Fatalf("defaults were not retained: %q", loaded.Detection.Sensitivity)
+	if loaded.Detection.Threshold != DefaultThreatThreshold || loaded.Detection.Persistence != DefaultPersistence {
+		t.Fatalf("defaults were not retained: threshold %v persistence %d", loaded.Detection.Threshold, loaded.Detection.Persistence)
+	}
+	if !loaded.Detection.Stateful {
+		t.Fatal("stateful detection default was not retained")
 	}
 	if loaded.BGP.Enabled {
 		t.Fatal("BGP unexpectedly enabled")
+	}
+}
+
+func TestDetectionTuningIsExplicitAndRoundTrips(t *testing.T) {
+	cfg := Default()
+	cfg.ProtectedCIDRs = []string{"203.0.113.0/24"}
+	cfg.Mitigation.BlocklistDir = t.TempDir()
+	cfg.Detection.Stateful = false
+	cfg.Detection.Threshold = 55
+	cfg.Detection.Persistence = 3
+	cfg.Detection.PPSFloor = 2500
+	cfg.Detection.BPSFloor = 25_000_000
+	path := writeConfig(t, cfg)
+	loaded, warnings, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v (warnings: %v)", err, warnings)
+	}
+	if loaded.Detection.Stateful {
+		t.Fatal("stateless detection was not retained")
+	}
+	if loaded.Detection.Threshold != 55 || loaded.Detection.Persistence != 3 {
+		t.Fatalf("threshold/persistence = %v/%d", loaded.Detection.Threshold, loaded.Detection.Persistence)
+	}
+	if loaded.Detection.PPSFloor != 2500 || loaded.Detection.BPSFloor != 25_000_000 {
+		t.Fatalf("floors = %v/%v", loaded.Detection.PPSFloor, loaded.Detection.BPSFloor)
+	}
+	found := false
+	for _, warning := range warnings {
+		if strings.Contains(warning, "stateful") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing stateless warning: %v", warnings)
+	}
+}
+
+func TestValidationRejectsInvalidDetectionTuning(t *testing.T) {
+	cfg := Default()
+	cfg.ProtectedCIDRs = []string{"203.0.113.0/24"}
+	cfg.Mitigation.BlocklistDir = t.TempDir()
+	cfg.Detection.Threshold = 0
+	cfg.Detection.Persistence = 0
+	cfg.Detection.PPSFloor = 0
+	cfg.Detection.BPSFloor = -1
+	_, err := cfg.Validate()
+	if err == nil {
+		t.Fatal("invalid detection tuning was accepted")
+	}
+	for _, want := range []string{"detection.threshold", "detection.persistence", "detection.pps_floor", "detection.bps_floor"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
 	}
 }
 

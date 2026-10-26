@@ -363,7 +363,7 @@ Detection is a funnel, not a single detector. Each layer has a different cost, c
 
 **Why here:** It catches protocol-level abuse that a simple volume threshold would miss, and it helps explain a volumetric spike.
 
-**Caveat:** Sampled traffic does not always include the handshake. A legitimate mid-stream packet can look out-of-state simply because the sensor missed the beginning. This layer must therefore be corroborated by rate or other evidence, never used alone on a single packet.
+**Caveat:** Sampled traffic does not always include the handshake. A legitimate mid-stream packet can look out-of-state simply because the sensor missed the beginning. This layer must therefore be corroborated by rate or other evidence, never used alone on a single packet. Because that reconstruction is unreliable with some sFlow deployments, the entire layer is optional: `detection.stateful: false` disables the connection table, out-of-state evidence, and handshake trust, and detection falls back to the remaining layers.
 
 ### Layer 4 — Application and protocol filters
 
@@ -390,7 +390,7 @@ The same pattern can later cover SSH, DNS, HTTP, and other services.
 
 **Behavior:** Maintain an adaptive baseline of packets per second and bits per second for each protected destination. Compare the current short-term rate to that baseline. Combine the deviation with other signals:
 
-- absolute rate above a floor for the network type,
+- absolute rate above the configured PPS or bandwidth floor,
 - z-score or equivalent deviation from the baseline,
 - small average packet size,
 - SYN-dominant or UDP-dominant mix,
@@ -591,21 +591,23 @@ The system should not rely on rate alone. Useful signals include:
 
 Each evaluation produces a threat score from the weighted signals. The score is smoothed over time. A single high score is an observation; a sustained high score is an attack.
 
-The system should require the score to stay above a threshold for several consecutive evaluation windows. The exact number depends on sensitivity:
+The system requires the score to stay above a threshold for several consecutive evaluation windows. Both values are configured directly:
 
-- **Relaxed:** high threshold, long persistence. Fewer alerts, slower response.
-- **Balanced:** the default. Reasonable response without being jumpy.
-- **Aggressive:** lower threshold, shorter persistence. Faster response, more false positives.
-- **Ultra:** for environments that prefer action over patience.
-- **Instant:** for testing or extremely low-latency needs; expect noise.
+- `detection.threshold` is the score that starts the persistence counter.
+- `detection.persistence` is the number of consecutive windows that must stay above it.
 
-Network type scales the absolute floors:
+Lower thresholds and shorter persistence respond faster but produce more false positives; higher values do the opposite. The default is deliberately middle-of-the-road, not a profile that fits every network.
 
-- **Home:** low floors; a few thousand packets per second can matter.
-- **Office:** higher floors; normal business traffic is larger.
-- **Datacenter:** high floors; only significant volume should trigger statistical detection.
+The absolute floors are also explicit. `detection.pps_floor` and `detection.bps_floor` are the packet and bandwidth rates below which the absolute-rate signals do not fire. A small network needs low floors; a datacenter needs high ones. Rather than guessing from a network-type label, the operator sets the values that match the protected destination.
 
-The presets are not a substitute for tuning. They are sane starting points.
+### 13.5.1 Stateful and stateless protection
+
+Layers 3 and 5 assume the sensor can reconstruct enough TCP behavior to distinguish a handshake from an established session. With sampled sFlow that is not always true. The sensor therefore exposes the choice directly through `detection.stateful`:
+
+- **Stateful (`true`, default):** maintain a bounded TCP session table, use out-of-state traffic as evidence, credit completed handshakes and long-lived sessions when computing trust, and expose the Connections view.
+- **Stateless (`false`):** keep no connection table. Out-of-state findings and handshake trust are disabled, and the Connections view explains that tracking is off. Detection still uses sampled rates, protocol and SYN mixes, source reputation, blocklists, and application rules.
+
+Neither mode is universally correct. Stateful is stronger when the sampling ratio is dense enough to see most handshakes. Stateless is honest when the telemetry cannot support that claim, and it avoids the false confidence of a connection table assembled from incomplete samples.
 
 ### 13.6 Cooldown
 
@@ -1022,7 +1024,7 @@ Configuration should be small enough to understand and explicit enough to be saf
 - **Dashboard:** HTTP listen address.
 - **Memory and performance:** buffer size, number of shards, cleanup interval, stats TTL, profiler interval.
 - **Ownership:** protected CIDRs, trusted IPs.
-- **Detection:** sensitivity preset, network type.
+- **Detection:** stateful or stateless protection, threshold, persistence, PPS and BPS floors.
 - **BGP:** enabled, local AS, peer IP, peer AS, community, next hop.
 - **Mitigation:** blocklist path, automatic blocking, default duration, deduplication window.
 - **Protocol tuning:** per-protocol rate limits and block durations.
@@ -1034,7 +1036,7 @@ Configuration should be small enough to understand and explicit enough to be saf
 - BGP disabled by default.
 - Dashboard bound to localhost by default.
 - Simulation rather than action when BGP is off.
-- Conservative sensitivity.
+- Conservative tuning: a high threshold and a persistence window longer than one evaluation.
 - Short mitigation duration.
 - No trusted sources unless the operator adds them.
 - Protected CIDRs must be explicit; the system should refuse to run with an empty set.
@@ -1058,7 +1060,7 @@ Warn, but do not necessarily fail, for suspicious values:
 
 ### 20.4 Reload
 
-Configuration is read at startup. Blocklists are the exception: they are operational data and must be reloadable without a restart. If the operator wants to change detection sensitivity, that is a deliberate restart-level change, not a hot toggle.
+Configuration is read at startup. Blocklists are the exception: they are operational data and must be reloadable without a restart. If the operator wants to change detection tuning or switch between stateful and stateless protection, that is a deliberate restart-level change, not a hot toggle.
 
 ### 20.5 Secrets
 
@@ -1076,7 +1078,7 @@ Webhook URLs, BGP passwords if any, and API tokens are secrets. Do not log them.
 4. Point an sFlow exporter at the collector.
 5. Confirm packets appear in the inspector.
 6. Watch the dashboard long enough to learn the normal rhythm.
-7. Tune sensitivity and trust.
+7. Decide whether the sampling supports stateful tracking, then tune the threshold, persistence, floors, and trust.
 8. Configure BGP in a lab or with a canary prefix.
 9. Enable mitigation only after simulation looks correct.
 
@@ -1100,7 +1102,7 @@ The sensor needs a BGP session to the edge. The operator must ensure:
 
 ### 21.4 Day-2 operations
 
-- Watch for false positives and adjust sensitivity or trust.
+- Watch for false positives and adjust the threshold, persistence, floors, or trust.
 - Keep blocklists current.
 - Monitor collector health and sample rate.
 - Watch memory and cleanup behavior.

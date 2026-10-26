@@ -83,19 +83,30 @@ type DashboardConfig struct {
 }
 
 type DetectionConfig struct {
-	Sensitivity         string   `json:"sensitivity"`
-	NetworkType         string   `json:"network_type"`
+	// Stateful enables TCP session tracking. When false the sensor still scores
+	// sampled rates and protocol mixes, but it does not infer connections,
+	// report out-of-state traffic, or credit handshakes and long sessions.
+	Stateful            bool     `json:"stateful"`
 	EvaluationInterval  Duration `json:"evaluation_interval"`
 	RateWindowSeconds   int      `json:"rate_window_seconds"`
 	Cooldown            Duration `json:"cooldown"`
 	WarmupWindows       int      `json:"warmup_windows"`
 	TrustExemptionScore float64  `json:"trust_exemption_score"`
 	OutOfStateMinPPS    float64  `json:"out_of_state_min_pps"`
-	PPSFloor            float64  `json:"pps_floor_override"`
-	BPSFloor            float64  `json:"bps_floor_override"`
-	ThreatThreshold     float64  `json:"threat_threshold_override"`
-	Persistence         int      `json:"persistence_override"`
+	Threshold           float64  `json:"threshold"`
+	Persistence         int      `json:"persistence"`
+	PPSFloor            float64  `json:"pps_floor"`
+	BPSFloor            float64  `json:"bps_floor"`
 }
+
+// Default detection tuning. These are ordinary starting values, not presets:
+// every field is explicit in the configuration and can be changed independently.
+const (
+	DefaultThreatThreshold = 70.0
+	DefaultPersistence     = 5
+	DefaultPPSFloor        = 10_000.0
+	DefaultBPSFloor        = 100_000_000.0
+)
 
 type MitigationConfig struct {
 	BlocklistDir    string   `json:"blocklist_dir"`
@@ -185,14 +196,17 @@ func Default() Config {
 		ProtectedCIDRs: nil,
 		TrustedSources: nil,
 		Detection: DetectionConfig{
-			Sensitivity:         "balanced",
-			NetworkType:         "office",
+			Stateful:            true,
 			EvaluationInterval:  Duration(time.Second),
 			RateWindowSeconds:   5,
 			Cooldown:            Duration(10 * time.Minute),
 			WarmupWindows:       30,
 			TrustExemptionScore: 70,
 			OutOfStateMinPPS:    100,
+			Threshold:           DefaultThreatThreshold,
+			Persistence:         DefaultPersistence,
+			PPSFloor:            DefaultPPSFloor,
+			BPSFloor:            DefaultBPSFloor,
 		},
 		Mitigation: MitigationConfig{
 			BlocklistDir:    "./blocklists",
@@ -279,15 +293,6 @@ func Load(path string) (Config, []string, error) {
 	return cfg, warnings, nil
 }
 
-var (
-	validSensitivities = map[string]bool{
-		"relaxed": true, "balanced": true, "aggressive": true, "ultra": true, "instant": true,
-	}
-	validNetworkTypes = map[string]bool{
-		"home": true, "office": true, "datacenter": true,
-	}
-)
-
 // Validate checks the configuration and returns non-fatal warnings.
 func (c *Config) Validate() ([]string, error) {
 	var warnings []string
@@ -325,12 +330,6 @@ func (c *Config) Validate() ([]string, error) {
 	if _, err := netutil.ParsePrefixes(c.TrustedSources); err != nil {
 		errs = append(errs, fmt.Errorf("trusted_sources: %w", err))
 	}
-	if !validSensitivities[strings.ToLower(c.Detection.Sensitivity)] {
-		errs = append(errs, fmt.Errorf("detection.sensitivity %q must be one of relaxed, balanced, aggressive, ultra, instant", c.Detection.Sensitivity))
-	}
-	if !validNetworkTypes[strings.ToLower(c.Detection.NetworkType)] {
-		errs = append(errs, fmt.Errorf("detection.network_type %q must be one of home, office, datacenter", c.Detection.NetworkType))
-	}
 	if c.Detection.EvaluationInterval <= 0 {
 		errs = append(errs, errors.New("detection.evaluation_interval must be positive"))
 	}
@@ -349,14 +348,20 @@ func (c *Config) Validate() ([]string, error) {
 	if c.Detection.TrustExemptionScore < 0 || c.Detection.TrustExemptionScore > 100 {
 		errs = append(errs, errors.New("detection.trust_exemption_score must be between 0 and 100"))
 	}
-	if c.Detection.PPSFloor < 0 || c.Detection.BPSFloor < 0 {
-		errs = append(errs, errors.New("detection floor overrides must not be negative"))
+	if c.Detection.Threshold < 1 || c.Detection.Threshold > 100 {
+		errs = append(errs, errors.New("detection.threshold must be between 1 and 100"))
 	}
-	if c.Detection.ThreatThreshold != 0 && (c.Detection.ThreatThreshold < 1 || c.Detection.ThreatThreshold > 100) {
-		errs = append(errs, errors.New("detection.threat_threshold_override must be between 1 and 100"))
+	if c.Detection.Persistence < 1 {
+		errs = append(errs, errors.New("detection.persistence must be at least 1"))
 	}
-	if c.Detection.Persistence < 0 {
-		errs = append(errs, errors.New("detection.persistence_override must not be negative"))
+	if c.Detection.PPSFloor <= 0 {
+		errs = append(errs, errors.New("detection.pps_floor must be positive"))
+	}
+	if c.Detection.BPSFloor <= 0 {
+		errs = append(errs, errors.New("detection.bps_floor must be positive"))
+	}
+	if !c.Detection.Stateful {
+		warnings = append(warnings, "detection.stateful is disabled; TCP session tracking, out-of-state findings, handshake trust, and the Connections view are inactive")
 	}
 
 	if strings.TrimSpace(c.Mitigation.BlocklistDir) == "" {

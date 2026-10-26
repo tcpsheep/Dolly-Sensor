@@ -28,7 +28,7 @@ Edit `config.json`:
   "sflow": { "listen": "0.0.0.0:6343" },
   "dashboard": { "listen": "127.0.0.1:8080" },
   "protected_cidrs": ["203.0.113.0/24", "198.51.100.0/24"],   // your real prefixes
-  "detection": { "sensitivity": "balanced", "network_type": "datacenter" },
+  "detection": { "stateful": true, "threshold": 70, "persistence": 5, "pps_floor": 50000, "bps_floor": 1000000000 },
   "mitigation": {
     "auto_block": false,                                     // stay in simulation
     "rate_limit_mbps": 100,

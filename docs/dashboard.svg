@@ -90,7 +90,7 @@
     <text x="266" y="384" font-size="15" font-weight="700" fill="#e6edf3">SIGNALS</text>
     <rect x="250" y="398" width="480" height="1.5" fill="#2a3235"/>
     <g fill="#e6edf3">
-      <text x="266" y="430">+  254.0k pps = 25.4x office floor</text>
+      <text x="266" y="430">+  254.0k pps = 25.4x configured floor</text>
       <text x="266" y="460">+  216.4 standard deviations above baseline</text>
       <text x="266" y="490">+  988x its learned baseline</text>
       <text x="266" y="520">+  tiny packets averaging 40 bytes</text>

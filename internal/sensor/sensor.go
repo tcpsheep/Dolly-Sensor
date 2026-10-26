@@ -162,19 +162,21 @@ func New(cfg config.Config, loadedWarnings []string, logger *slog.Logger) (*Sens
 		blocklist: lists,
 		intel:     profiles,
 		aggregate: aggregate.New(),
-		tcp: tcpstate.New(tcpstate.Options{
+		alerts:    alerts.New(cfg.Memory.AlertHistory, cfg.Detection.Cooldown.Std()),
+		hub:       events.New(),
+		ruleStore: ruleStore,
+		datagrams: make(chan []byte, cfg.Collector.Queue),
+		findings:  make(chan detect.Finding, 2048),
+		gate:      newFindingGate(2 * time.Second),
+	}
+	if cfg.Detection.Stateful {
+		s.tcp = tcpstate.New(tcpstate.Options{
 			PendingTTL:  cfg.Memory.TCPPendingTTL.Std(),
 			SessionTTL:  cfg.Memory.TCPSessionTTL.Std(),
 			MaxSessions: cfg.Memory.MaxTCPSessions,
-		}),
-		alerts:           alerts.New(cfg.Memory.AlertHistory, cfg.Detection.Cooldown.Std()),
-		hub:              events.New(),
-		ruleStore:        ruleStore,
-		datagrams:        make(chan []byte, cfg.Collector.Queue),
-		findings:         make(chan detect.Finding, 2048),
-		ruleObservations: make(chan model.Observation, cfg.Rules.EvaluationQueue),
-		gate:             newFindingGate(2 * time.Second),
+		})
 	}
+	s.ruleObservations = make(chan model.Observation, cfg.Rules.EvaluationQueue)
 	s.notifier = notify.New(notify.Options{
 		URL:     cfg.Alerting.WebhookURL,
 		Format:  cfg.Alerting.Format,
@@ -440,7 +442,7 @@ func (s *Sensor) processObservation(obs model.Observation, now time.Time) {
 	}
 
 	var tcpEvents []tcpstate.Event
-	if obs.DstProtected && obs.Protocol == 6 {
+	if s.tcp != nil && obs.DstProtected && obs.Protocol == 6 {
 		tcpEvents = s.tcp.Process(&obs)
 	}
 	obs.Finalize()

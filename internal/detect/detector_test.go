@@ -40,10 +40,9 @@ func testDetector(t *testing.T, intel *fakeIntel) *Detector {
 		t.Fatal(err)
 	}
 	detection := config.Default().Detection
-	detection.Sensitivity = "instant"
-	detection.NetworkType = "home"
+	detection.Stateful = true
 	detection.WarmupWindows = 1
-	detection.ThreatThreshold = 40
+	detection.Threshold = 40
 	detection.Persistence = 1
 	detection.PPSFloor = 100
 	detection.BPSFloor = 1_000
@@ -353,6 +352,35 @@ func TestTrustedAndInternalOutOfStateTrafficIsNotMitigated(t *testing.T) {
 			t.Fatalf("internal OOS source got an external action: %+v", finding.Action)
 		}
 	})
+}
+
+func TestStatelessProtectionIgnoresOutOfStateEvidence(t *testing.T) {
+	now := time.Now()
+	d := testDetector(t, &fakeIntel{})
+	d.cfg.Stateful = false
+	snapshot := trafficSnapshot(now, 100, 50, 500, 0, 0)
+	oos := map[netip.Addr]tcpstate.OOSStat{
+		netip.MustParseAddr("203.0.113.10"): {
+			OutOfState: 600,
+			Total:      650,
+			Rate:       600,
+		},
+	}
+	results := d.Evaluate(now, []aggregate.DestSnapshot{snapshot}, oos)
+	if len(results) != 1 {
+		t.Fatalf("results = %d", len(results))
+	}
+	for _, finding := range results[0].Findings {
+		if finding.Alert.Type == "tcp_out_of_state" {
+			t.Fatalf("stateless protection emitted TCP state finding: %+v", finding)
+		}
+	}
+	if results[0].State.OutOfStatePPS != 0 {
+		t.Fatalf("stateless protection reported out-of-state rate %v", results[0].State.OutOfStatePPS)
+	}
+	if params := d.Parameters(); params.Stateful {
+		t.Fatal("parameters report stateful tracking while disabled")
+	}
 }
 
 func findTCPStateFinding(t *testing.T, results []Result) *Finding {

@@ -13,18 +13,17 @@
   ],
   "trusted_sources": [],
   "detection": {
-    "sensitivity": "balanced",
-    "network_type": "office",
+    "stateful": true,
     "evaluation_interval": "1s",
     "rate_window_seconds": 5,
     "cooldown": "10m",
     "warmup_windows": 30,
     "trust_exemption_score": 70,
     "out_of_state_min_pps": 100,
-    "pps_floor_override": 0,
-    "bps_floor_override": 0,
-    "threat_threshold_override": 0,
-    "persistence_override": 0
+    "threshold": 70,
+    "persistence": 5,
+    "pps_floor": 10000,
+    "bps_floor": 100000000
   },
   "mitigation": {
     "blocklist_dir": "./examples/blocklists",

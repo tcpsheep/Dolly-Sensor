@@ -9,7 +9,6 @@ import (
 	"math"
 	"net/netip"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -40,8 +39,7 @@ type Options struct {
 
 // Parameters is the effective tuning exposed in the status view.
 type Parameters struct {
-	Sensitivity     string  `json:"sensitivity"`
-	NetworkType     string  `json:"network_type"`
+	Stateful        bool    `json:"stateful"`
 	Threshold       float64 `json:"threshold"`
 	Persistence     int     `json:"persistence"`
 	PPSFloor        float64 `json:"pps_floor"`
@@ -105,26 +103,6 @@ type baseline struct {
 	oosRate     float64
 }
 
-var floorsByNetwork = map[string]struct {
-	pps float64
-	bps float64
-}{
-	"home":       {2000, 20_000_000},
-	"office":     {10_000, 100_000_000},
-	"datacenter": {50_000, 1_000_000_000},
-}
-
-var presets = map[string]struct {
-	threshold   float64
-	persistence int
-}{
-	"relaxed":    {85, 8},
-	"balanced":   {70, 5},
-	"aggressive": {55, 3},
-	"ultra":      {40, 2},
-	"instant":    {25, 1},
-}
-
 // Detector is safe for concurrent evaluation and state reads.
 type Detector struct {
 	mu        sync.Mutex
@@ -145,34 +123,26 @@ type Detector struct {
 
 // New builds a detector from configuration.
 func New(opts Options) *Detector {
-	sensitivity := strings.ToLower(opts.Detection.Sensitivity)
-	preset, ok := presets[sensitivity]
-	if !ok {
-		preset = presets["balanced"]
-		sensitivity = "balanced"
+	threshold := opts.Detection.Threshold
+	if threshold <= 0 {
+		threshold = config.DefaultThreatThreshold
 	}
-	network := strings.ToLower(opts.Detection.NetworkType)
-	floor, ok := floorsByNetwork[network]
-	if !ok {
-		floor = floorsByNetwork["office"]
-		network = "office"
+	persistence := opts.Detection.Persistence
+	if persistence < 1 {
+		persistence = config.DefaultPersistence
 	}
-	if opts.Detection.PPSFloor > 0 {
-		floor.pps = opts.Detection.PPSFloor
+	ppsFloor := opts.Detection.PPSFloor
+	if ppsFloor <= 0 {
+		ppsFloor = config.DefaultPPSFloor
 	}
-	if opts.Detection.BPSFloor > 0 {
-		floor.bps = opts.Detection.BPSFloor
+	bpsFloor := opts.Detection.BPSFloor
+	if bpsFloor <= 0 {
+		bpsFloor = config.DefaultBPSFloor
 	}
-	threshold := preset.threshold
-	if opts.Detection.ThreatThreshold > 0 {
-		threshold = opts.Detection.ThreatThreshold
-	}
-	persistence := preset.persistence
-	if opts.Detection.Persistence > 0 {
-		persistence = opts.Detection.Persistence
-	}
-	opts.Detection.Sensitivity = sensitivity
-	opts.Detection.NetworkType = network
+	opts.Detection.Threshold = threshold
+	opts.Detection.Persistence = persistence
+	opts.Detection.PPSFloor = ppsFloor
+	opts.Detection.BPSFloor = bpsFloor
 	d := &Detector{
 		cfg:          opts.Detection,
 		ftpCfg:       opts.FTP,
@@ -181,8 +151,8 @@ func New(opts Options) *Detector {
 		trusted:      opts.Trusted,
 		threshold:    threshold,
 		persistence:  persistence,
-		ppsFloor:     floor.pps,
-		bpsFloor:     floor.bps,
+		ppsFloor:     ppsFloor,
+		bpsFloor:     bpsFloor,
 		trustExempt:  opts.Detection.TrustExemptionScore,
 		destinations: map[netip.Addr]*baseline{},
 	}
@@ -198,8 +168,7 @@ func New(opts Options) *Detector {
 // Parameters returns effective tuning.
 func (d *Detector) Parameters() Parameters {
 	return Parameters{
-		Sensitivity:     d.cfg.Sensitivity,
-		NetworkType:     d.cfg.NetworkType,
+		Stateful:        d.cfg.Stateful,
 		Threshold:       d.threshold,
 		Persistence:     d.persistence,
 		PPSFloor:        d.ppsFloor,
@@ -250,6 +219,9 @@ func (d *Detector) Evaluate(now time.Time, snapshots []aggregate.DestSnapshot, o
 
 func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos tcpstate.OOSStat) Result {
 	dst := snap.Addr.Unmap()
+	if !d.cfg.Stateful {
+		oos = tcpstate.OOSStat{}
+	}
 	base := d.destinations[dst]
 	if base == nil {
 		base = &baseline{firstSeen: snap.FirstSeen}
@@ -311,10 +283,10 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot, oos t
 	ppsRatio := safeRatio(pps, d.ppsFloor)
 	bpsRatio := safeRatio(bps, d.bpsFloor)
 	if pps >= d.ppsFloor {
-		add(10+math.Min(15, 5*math.Log2(math.Max(1, ppsRatio))), fmt.Sprintf("%s is %.1fx the %s PPS floor", formatPPS(pps), ppsRatio, d.cfg.NetworkType))
+		add(10+math.Min(15, 5*math.Log2(math.Max(1, ppsRatio))), fmt.Sprintf("%s is %.1fx the configured PPS floor", formatPPS(pps), ppsRatio))
 	}
 	if bps >= d.bpsFloor {
-		add(8+math.Min(12, 4*math.Log2(math.Max(1, bpsRatio))), fmt.Sprintf("%s is %.1fx the %s bandwidth floor", formatBPS(bps), bpsRatio, d.cfg.NetworkType))
+		add(8+math.Min(12, 4*math.Log2(math.Max(1, bpsRatio))), fmt.Sprintf("%s is %.1fx the configured bandwidth floor", formatBPS(bps), bpsRatio))
 	}
 	mature := base.samples >= 3
 	if mature {

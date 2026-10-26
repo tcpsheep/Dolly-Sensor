@@ -84,13 +84,11 @@ func TestObservationToMitigationAndShutdownWithdrawal(t *testing.T) {
 	cfg.Collector.Workers = 2
 	cfg.Collector.Queue = 2048
 	cfg.ProtectedCIDRs = []string{"203.0.113.0/24"}
-	cfg.Detection.Sensitivity = "instant"
-	cfg.Detection.NetworkType = "home"
 	cfg.Detection.EvaluationInterval = config.Duration(50 * time.Millisecond)
 	cfg.Detection.RateWindowSeconds = 1
 	cfg.Detection.WarmupWindows = 1
 	cfg.Detection.Persistence = 1
-	cfg.Detection.ThreatThreshold = 40
+	cfg.Detection.Threshold = 40
 	cfg.Detection.PPSFloor = 100
 	cfg.Detection.BPSFloor = 1_000
 	cfg.Detection.OutOfStateMinPPS = 100
@@ -208,4 +206,41 @@ func TestObservationToMitigationAndShutdownWithdrawal(t *testing.T) {
 	if !found {
 		t.Fatalf("withdrawals = %+v, want action %s", withdrawn, action.ID)
 	}
+}
+
+func TestStatelessProtectionDoesNotStartTCPTracker(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.Detection.Stateful = false
+	cfg.ProtectedCIDRs = []string{"203.0.113.0/24"}
+	cfg.Mitigation.BlocklistDir = filepath.Join(dir, "blocklists")
+	cfg.Persistence.ProfileFile = filepath.Join(dir, "profiles.json")
+	cfg.Rules.File = filepath.Join(dir, "rules.json")
+	cfg.Protocols.FTP.Enabled = false
+	cfg.Memory.PacketBuffer = 64
+
+	logger := slog.New(slog.NewTextHandler(testLogWriter{t}, nil))
+	s, err := New(cfg, nil, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if s.tcp != nil {
+		t.Fatal("stateful TCP tracker was created while protection is stateless")
+	}
+	if params := s.detector.Parameters(); params.Stateful {
+		t.Fatal("detector reports stateful protection while disabled")
+	}
+	connections := s.Connections(10)
+	if connections.Stateful || connections.Stats.Tracked != 0 || len(connections.Connections) != 0 {
+		t.Fatalf("stateless connections view = %+v", connections)
+	}
+	status := s.Status()
+	if status.TCP.Tracked != 0 || status.TCP.TotalSeen != 0 {
+		t.Fatalf("stateless status TCP = %+v", status.TCP)
+	}
+
+	// These paths dereference the tracker when stateful is enabled; they must
+	// stay safe when it is absent.
+	s.evaluateOnce(time.Now())
+	s.maintenanceOnce(context.Background(), time.Now())
 }

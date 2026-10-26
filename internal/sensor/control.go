@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"dollysensor/internal/model"
 	"dollysensor/internal/netutil"
 	"dollysensor/internal/notify"
+	"dollysensor/internal/tcpstate"
 )
 
 func (s *Sensor) evaluationLoop(ctx context.Context) {
@@ -39,7 +41,10 @@ func (s *Sensor) evaluationLoop(ctx context.Context) {
 func (s *Sensor) evaluateOnce(now time.Time) {
 	window := s.cfg.Detection.RateWindowSeconds
 	snapshots := s.aggregate.SnapshotAll(now, window)
-	oos := s.tcp.OutOfStateStats(now, window)
+	var oos map[netip.Addr]tcpstate.OOSStat
+	if s.tcp != nil {
+		oos = s.tcp.OutOfStateStats(now, window)
+	}
 	results := s.detector.Evaluate(now, snapshots, oos)
 	for _, result := range results {
 		dst, err := parseAddr(result.State.Destination)
@@ -149,12 +154,14 @@ func (s *Sensor) maintenanceOnce(ctx context.Context, now time.Time) {
 	s.aggregate.Cleanup(now, s.cfg.Memory.DestinationStatsTTL.Std())
 	s.detector.Cleanup(now, s.cfg.Memory.BaselineTTL.Std())
 	s.gate.cleanup(now)
-	for _, event := range s.tcp.Sweep(now) {
-		switch event.Kind {
-		case tcpEventHandshake:
-			s.intel.CreditHandshake(event.Destination, event.Source, event.At)
-		case tcpEventLongSession:
-			s.intel.CreditLongSession(event.Destination, event.Source, event.At, event.Duration)
+	if s.tcp != nil {
+		for _, event := range s.tcp.Sweep(now) {
+			switch event.Kind {
+			case tcpEventHandshake:
+				s.intel.CreditHandshake(event.Destination, event.Source, event.At)
+			case tcpEventLongSession:
+				s.intel.CreditLongSession(event.Destination, event.Source, event.At, event.Duration)
+			}
 		}
 	}
 	s.publishMitigationChanges(ctx)

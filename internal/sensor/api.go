@@ -155,6 +155,7 @@ type PacketFilter struct {
 
 // ConnectionsData is the TCP session view.
 type ConnectionsData struct {
+	Stateful    bool                  `json:"stateful"`
 	Stats       tcpstate.Stats        `json:"stats"`
 	Connections []tcpstate.Connection `json:"connections"`
 }
@@ -467,10 +468,19 @@ func (s *Sensor) Connections(limit int) ConnectionsData {
 	if limit <= 0 || limit > 2000 {
 		limit = 500
 	}
-	return ConnectionsData{
-		Stats:       s.tcp.Stats(),
-		Connections: s.tcp.Established(limit),
+	data := ConnectionsData{Stateful: s.cfg.Detection.Stateful}
+	if s.tcp != nil {
+		data.Stats = s.tcp.Stats()
+		data.Connections = s.tcp.Established(limit)
 	}
+	return data
+}
+
+func (s *Sensor) tcpStats() tcpstate.Stats {
+	if s.tcp == nil {
+		return tcpstate.Stats{}
+	}
+	return s.tcp.Stats()
 }
 
 // MitigationHistory returns recent mitigations, newest first.
@@ -613,7 +623,7 @@ func (s *Sensor) Status() StatusData {
 			PacketBuffer:     s.ring.Len(),
 			PacketBufferCap:  s.cfg.Memory.PacketBuffer,
 		},
-		TCP:             s.tcp.Stats(),
+		TCP:             s.tcpStats(),
 		DestinationLive: s.aggregate.DestinationCount(),
 		Profiles:        s.intel.Count(),
 		Alerts:          s.alerts.Stats(),

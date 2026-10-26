@@ -36,7 +36,7 @@ the UI. A second binary generates synthetic sFlow for lab use.
 |---|---|
 | **Category** | Out-of-band, flow-based DDoS detection and mitigation |
 | **Telemetry** | sFlow v5 over UDP |
-| **Detection** | Blocklists, TCP state, FTP abuse, source reputation, volumetric scoring, warm-up and trust |
+| **Detection** | Blocklists, optional stateful TCP tracking, FTP abuse, source reputation, volumetric scoring, warm-up and trust |
 | **Mitigation** | BGP Flowspec (RFC 8955/8956) and RTBH (RFC 3882), IPv4 |
 | **Policy** | Persistent rules engine: standing and conditional rules, dashboard editor, JSON API |
 | **Dependencies** | Go standard library only — no modules, no database, no JS toolchain |
@@ -98,11 +98,11 @@ in-kernel XDP drops, inline scrubbing, or multi-tenant management today.
 1. **Ingest** sFlow v5 datagrams over UDP, decode the sampled packets, and estimate
    real packet and byte counts from the sampling rate.
 2. **Profile** every protected destination and every external source — recent rates,
-   long-term baselines, protocol mix, TCP session behavior, and trust earned through
-   completed handshakes and long-lived sessions.
-3. **Detect** attacks by layering deterministic checks (blocklists, out-of-state TCP,
-   FTP abuse), behavioral reputation, and statistical volume evidence into a single
-   explainable score.
+   long-term baselines, protocol mix, TCP session behavior when stateful tracking is
+   enabled, and trust earned through completed handshakes and long-lived sessions.
+3. **Detect** attacks by layering deterministic checks (blocklists, optional
+   out-of-state TCP, FTP abuse), behavioral reputation, and statistical volume evidence
+   into a single explainable score.
 4. **Decide** with guardrails: only explicitly protected prefixes can ever be the
    target, default routes are refused, internal sources are never blocked, and every
    action is bounded, deduplicated, and temporary unless it comes from a standing rule.
@@ -308,9 +308,11 @@ Rules sit beside automatic detection, not in front of it. The detection funnel i
 layered so that the cheapest, most certain checks run first:
 
 - **Blocklist** hits are deterministic and immediately critical.
-- **TCP state** distinguishes handshakes, established sessions, and out-of-state
-  traffic; session state is updated before a packet is judged, and server replies
-  from a privileged port are not treated as client abuse.
+- **TCP state (optional)** distinguishes handshakes, established sessions, and
+  out-of-state traffic when `detection.stateful` is enabled; session state is updated
+  before a packet is judged, and server replies from a privileged port are not treated
+  as client abuse. Set it to `false` for stateless protection when sampled sFlow data
+  cannot reconstruct connections reliably.
 - **FTP** rules examine control/data direction, command size, and rate.
 - **Reputation** from the profiling layer penalizes SYN-heavy sources and rewards
   completed handshakes and long sessions.
@@ -404,28 +406,49 @@ CIDRs, unsafe BGP settings, and empty protected sets are rejected at startup.
 
 ### Detection
 
-`detection.sensitivity` selects the score threshold and persistence window:
+Detection tuning is explicit. Set the threshold, persistence, and absolute floors
+directly; there are no network-type or sensitivity presets to select.
 
-| Preset | Threshold | Consecutive windows |
-|---|---:|---:|
-| `relaxed` | 85 | 8 |
-| `balanced` | 70 | 5 |
-| `aggressive` | 55 | 3 |
-| `ultra` | 40 | 2 |
-| `instant` | 25 | 1 |
+```json
+"detection": {
+  "stateful": true,
+  "threshold": 70,
+  "persistence": 5,
+  "pps_floor": 10000,
+  "bps_floor": 100000000,
+  "evaluation_interval": "1s",
+  "rate_window_seconds": 5,
+  "cooldown": "10m",
+  "warmup_windows": 30,
+  "trust_exemption_score": 70,
+  "out_of_state_min_pps": 100
+}
+```
 
-`detection.network_type` selects the absolute floors that avoid reacting to noise:
+- `stateful` — when `true`, the sensor tracks TCP handshakes and sessions for
+  out-of-state findings, handshake and long-session trust credit, and the Connections
+  view. When `false`, protection is stateless: no connection table is maintained, and
+  detection relies on sampled rates, protocol and SYN mixes, reputation, blocklists,
+  and application rules. Stateless mode is a reasonable choice when sampled sFlow
+  telemetry cannot reconstruct connections reliably.
+- `threshold` — threat score (1–100) that starts the persistence counter.
+- `persistence` — consecutive evaluation windows the score must stay above the
+  threshold before an attack is declared.
+- `pps_floor` / `bps_floor` — absolute packet and bandwidth rates below which the
+  absolute-rate signals do not fire. These are the only network-size assumptions in
+  the detector; set them to values that make sense for each protected destination.
+- `evaluation_interval` and `rate_window_seconds` — how often detection runs and how
+  much sampled traffic each rate represents.
+- `warmup_windows` — how long a new destination stays in the learning phase with a
+  capped score.
+- `trust_exemption_score` — trust level above which a source gets additional patience.
+- `out_of_state_min_pps` — minimum out-of-state rate for TCP state evidence; ignored
+  when `stateful` is `false`.
+- `cooldown` — suppresses repeated alert attention, not evaluation and not an active
+  mitigation.
 
-| Network | PPS floor | BPS floor |
-|---|---:|---:|
-| `home` | 2,000 | 20 Mbps |
-| `office` | 10,000 | 100 Mbps |
-| `datacenter` | 50,000 | 1 Gbps |
-
-`*_override` fields replace preset values when greater than zero. `warmup_windows`
-controls how long a new destination stays in the learning phase with a capped score.
-`cooldown` suppresses repeated alert attention — not evaluation, and not an active
-mitigation.
+For a quieter sensor, raise `threshold` and `persistence`; for faster response, lower
+them. The example values are starting points, not a fixed profile.
 
 ### Rules
 
@@ -510,7 +533,8 @@ Every retained structure is bounded: `memory.packet_buffer` and
 `memory.alert_history` cap the inspector and alert list; destination stats, baselines,
 TCP sessions, pending handshakes, FTP state, and trust decay all have TTLs and
 periodic cleanup; `max_tcp_sessions` and `max_profiles` cap the session and profile
-tables with oldest-first eviction.
+tables with oldest-first eviction. The TCP session limits are used only when
+`detection.stateful` is enabled.
 
 ## Dashboard
 
@@ -522,7 +546,8 @@ Served from the Go binary with no build step. Views:
   reputations, observations, alerts, profile, mitigations.
 - **Intelligence** — detection parameters, learned baselines, reputation, trust.
 - **Inspector** — bounded recent observations with filters and live prepend.
-- **Connections** — TCP state learned from samples.
+- **Connections** — TCP state learned from samples when `detection.stateful` is on;
+  the view explains itself when protection is stateless.
 - **Blocklist** — entry counts, loaded files, manual additions, reload.
 - **Rules** — the full rules engine: catalog in evaluation order, editor, preview,
   drag-and-drop ordering, persistence state.
@@ -649,7 +674,7 @@ MIT. Builds and derivative work are welcome as long as the copyright notice is k
 - **No observations** — confirm the exporter targets the collector UDP port and the
   destination is inside a protected CIDR.
 - **No detection during a test flood** — the absolute floor and persistence window
-  must be exceeded; check the sensitivity preset, network type, and
+  must be exceeded; check `threshold`, `persistence`, `pps_floor`, `bps_floor`, and
   `rate_window_seconds`.
 - **Actions are simulated** — BGP is disabled. This is the intended safe default.
 - **Action is failed** — inspect the mitigation view and logs for the BGP error; fix

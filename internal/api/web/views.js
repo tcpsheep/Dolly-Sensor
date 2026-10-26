@@ -178,11 +178,14 @@
       ["Handshake complete", packet.handshake_completed ? "yes" : "no"],
       ["Out of state", packet.out_of_state ? badge("out of state", "warn") : "no"],
     ];
+    const stateful = !(D.state.status && D.state.status.detection && D.state.status.detection.stateful === false);
     const body = el("div", { class: "stack" },
       el("div", { class: "banner banner-info", text: packet.summary || "No summary available." }),
       section("Packet", kvList(flowPairs)),
       section("Capture and sampling", kvList(capturePairs)),
-      section("TCP state evidence", kvList(sessionPairs)),
+      stateful
+        ? section("TCP state evidence", kvList(sessionPairs))
+        : section("TCP state evidence", el("div", { class: "empty-state", text: "Stateful protection is disabled; this packet was not matched against a connection table." })),
       section("Application context", appPairs.length ? kvList(appPairs) : el("div", { class: "empty-state", text: "No application metadata matched this packet." })),
       packet.arp ? section("ARP", kvList([
         ["Operation", packet.arp.operation === 1 ? "request" : packet.arp.operation === 2 ? "reply" : packet.arp.operation],
@@ -352,14 +355,14 @@
       ["Datagrams", fmtInt(health.collector.datagrams) + " · " + fmtInt(health.collector.decode_errors) + " decode errors"],
       ["Dropped", fmtInt(health.collector.dropped_datagrams) + " datagrams / " + fmtInt(health.collector.dropped_findings) + " findings"],
       ["Protected destinations", fmtInt(health.profiles) + " profiles · " + fmtInt(health.destination_live) + " live"],
-      ["TCP state", fmtInt(health.tcp.established) + " established · " + fmtInt(health.tcp.out_of_state) + " out of state"],
+      ["TCP state", (health.detection && health.detection.stateful) ? fmtInt(health.tcp.established) + " established · " + fmtInt(health.tcp.out_of_state) + " out of state" : "disabled (stateless protection)"],
       ["BGP", health.bgp ? health.bgp.state + " · " + (health.bgp.peer || "peer") : "disabled (simulation)"],
       ["Last packet", timeNode(health.collector.last_packet)],
       ["Last evaluation", timeNode(health.collector.last_evaluation)],
       ["Persistence", health.persistence.last_save ? timeNode(health.persistence.last_save) : "not saved yet"],
     ];
     const detectionPairs = [
-      ["Sensitivity / network", (data.detection.sensitivity || "—") + " / " + (data.detection.network_type || "—")],
+      ["Protection", data.detection.stateful ? "stateful" : "stateless"],
       ["Threat threshold", fmtNumber(data.detection.threshold, 1)],
       ["Persistence / warm-up", data.detection.persistence + " windows / " + data.detection.warmup_windows],
       ["Floor PPS / BPS", fmtPPS(data.detection.pps_floor) + " / " + fmtBPS(data.detection.bps_floor)],
@@ -391,7 +394,7 @@
           alertsCard(data.recent_alerts || [], 10, alerts.total),
           activeMitigationsCard(data.active_mitigations || []),
           card("Collector health", "Ingestion never waits for this dashboard", kvList(healthPairs)),
-          card("Detection parameters", "Effective preset and overrides", kvList(detectionPairs)),
+          card("Detection parameters", "Directly configured thresholds and floors", kvList(detectionPairs)),
         ),
       ),
     );
@@ -551,6 +554,7 @@
     const profile = detail.profile || null;
     const live = detail.live || null;
     const detection = detail.detection || null;
+    const stateful = !(D.state.status && D.state.status.detection && D.state.status.detection.stateful === false);
     const recentAlerts = detail.alerts || [];
     const actions = detail.actions || [];
     const recent = detail.recent || [];
@@ -625,7 +629,7 @@
       ["Samples", fmtInt(detection.samples)],
       ["Baseline PPS / BPS", fmtPPS(detection.baseline_pps) + " / " + fmtBPS(detection.baseline_bps)],
       ["Z PPS / Z BPS", fmtNumber(detection.z_pps, 2) + " / " + fmtNumber(detection.z_bps, 2)],
-      ["Out of state", fmtPPS(detection.out_of_state_pps)],
+      ["Out of state", stateful ? fmtPPS(detection.out_of_state_pps) : "not tracked (stateless)"],
       ["Last evaluation", timeNode(detection.last_evaluation)],
     ] : [["Detection", "No evaluation yet"]];
     const signals = detection && detection.signals ? detection.signals : [];
@@ -661,7 +665,7 @@
         kpi("Current traffic", fmtPPS(live && live.pps), fmtBPS(live && live.bps), { valueId: "dest-pps" }),
         kpi("Baseline", fmtPPS(detection && detection.baseline_pps), fmtBPS(detection && detection.baseline_bps)),
         kpi("Threat score", fmtNumber(score, 1), "smoothed " + fmtNumber(smoothed, 1), { variant: currentThreat === "under_attack" ? "danger" : currentThreat === "anomalous" ? "warn" : "accent" }),
-        kpi("Out of state", fmtPPS(detection && detection.out_of_state_pps), "TCP evidence"),
+        kpi("Out of state", stateful ? fmtPPS(detection && detection.out_of_state_pps) : "off", stateful ? "TCP evidence" : "stateless protection"),
         kpi("Sources", fmtInt(liveSources), fmtInt(profile && profile.trusted_count) + " trusted"),
         kpi("Alerts", fmtInt(alertCount), fmtInt(actions.length) + " mitigation actions"),
       ),
@@ -756,8 +760,7 @@
     }));
     const manualTable = table(["Destination", "Source", "Trust", "Activity", "Last seen"], manualRows, { compact: true, empty: "No manual trust decisions." });
     const paramsPairs = [
-      ["Sensitivity", params.sensitivity || "—"],
-      ["Network type", params.network_type || "—"],
+      ["Protection", params.stateful ? "stateful" : "stateless"],
       ["Threshold", fmtNumber(params.threshold, 1)],
       ["Persistence", params.persistence + " windows"],
       ["PPS floor", fmtPPS(params.pps_floor)],
@@ -779,7 +782,7 @@
         kpi("Threshold", fmtNumber(params.threshold, 1), "effective threat score"),
       ),
       el("div", { class: "grid-2" },
-        card("Detection parameters", "Preset plus configuration overrides", kvList(paramsPairs)),
+        card("Detection parameters", "Explicit configuration values", kvList(paramsPairs)),
         card("Learning model", "Why a source is trusted", el("div", {},
           el("p", { class: "card-note", text: "Trust starts with a small initial credit, grows slowly for active days, completed handshakes, and long sessions, and decays when a source is absent. A manual decision is an explicit operator override. Trust lowers suspicion; it never bypasses the blocklist." }),
           chips(["initial credit", "active-day credit", "handshake credit", "long-session credit", "daily decay", "manual override"]),
@@ -990,8 +993,9 @@
   async function loadConnections(route, token) {
     const data = await apiGet("/api/connections");
     if (token !== D.state.token) return;
+    const stateful = data.stateful !== false;
     const stats = data.stats || {};
-    const connections = data.connections || [];
+    const connections = stateful ? (data.connections || []) : [];
     const rows = connections.map((connection) => ({
       cells: [
         el("span", { class: "cell-mono", text: connection.source }),
@@ -1008,13 +1012,15 @@
     const connTable = table([
       "Source", "Destination", "Protocol", "Ports", "State", { label: "Duration", class: "numeric" },
       { label: "Packets", class: "numeric" }, { label: "Bytes", class: "numeric" }, "Last seen",
-    ], rows, { compact: true, empty: "No established TCP sessions inferred from the current sample stream." });
+    ], rows, { compact: true, empty: stateful ? "No established TCP sessions inferred from the current sample stream." : "Stateful protection is disabled; the sensor is not tracking connections." });
     const view = el("div", {},
       el("div", { class: "view-top" },
         el("div", { class: "view-lede", text: "A best-effort view of plausible TCP conversations. Sampling frequently misses handshakes, so an empty table or an incomplete handshake is not proof of malicious traffic." }),
         el("div", { class: "view-actions" }, refreshButton()),
       ),
+      stateful ? null : el("div", { class: "banner banner-warn" }, el("strong", { text: "Stateless protection. " }), "detection.stateful is false, so connection tracking, out-of-state TCP evidence, and handshake trust are disabled. Detection still uses sampled rates, protocol and SYN mixes, reputation, blocklists, and application rules."),
       el("div", { class: "grid-kpi" },
+        kpi("Protection", stateful ? "stateful" : "stateless", stateful ? "TCP session tracking" : "no connection table", { variant: stateful ? "good" : "warn" }),
         kpi("Established", fmtInt(stats.established), "sessions", { variant: "good" }),
         kpi("Pending", fmtInt(stats.pending), "handshakes in progress"),
         kpi("Tracked", fmtInt(stats.tracked), "bounded session table"),
@@ -2123,6 +2129,7 @@
     D.applyHeader(status);
     const cfg = settings.config || {};
     const detection = cfg.detection || {};
+    const stateful = detection.stateful !== false;
     const mitigation = cfg.mitigation || {};
     const collector = cfg.collector || {};
     const dashboard = cfg.dashboard || {};
@@ -2158,18 +2165,17 @@
       ["Auto-block", mitigation.auto_block ? "enabled" : "disabled"],
     ];
     const detectionPairs = [
-      ["Sensitivity", detection.sensitivity || "—"],
-      ["Network type", detection.network_type || "—"],
+      ["Protection", detection.stateful ? "stateful" : "stateless"],
       ["Evaluation interval", detection.evaluation_interval || "—"],
       ["Rate window", (detection.rate_window_seconds || 0) + " seconds"],
       ["Cooldown", detection.cooldown || "—"],
       ["Warm-up windows", detection.warmup_windows],
       ["Trust exemption score", fmtNumber(detection.trust_exemption_score, 1)],
-      ["Out-of-state minimum", fmtPPS(detection.out_of_state_min_pps)],
-      ["PPS floor override", detection.pps_floor_override ? fmtPPS(detection.pps_floor_override) : "preset"],
-      ["BPS floor override", detection.bps_floor_override ? fmtBPS(detection.bps_floor_override) : "preset"],
-      ["Threshold override", detection.threat_threshold_override || "preset"],
-      ["Persistence override", detection.persistence_override || "preset"],
+      ["Out-of-state minimum", detection.stateful ? fmtPPS(detection.out_of_state_min_pps) : "not used (stateless)"],
+      ["Threat threshold", fmtNumber(detection.threshold, 1)],
+      ["Persistence", (detection.persistence || 0) + " windows"],
+      ["PPS floor", fmtPPS(detection.pps_floor)],
+      ["BPS floor", fmtBPS(detection.bps_floor)],
     ];
     const mitigationPairs = [
       ["Blocklist directory", mitigation.blocklist_dir || "—"],
@@ -2203,9 +2209,9 @@
       ["Alert history", fmtInt(memory.alert_history) + " records"],
       ["Destination stats TTL", memory.destination_stats_ttl || "—"],
       ["Baseline TTL", memory.baseline_ttl || "—"],
-      ["TCP session TTL", memory.tcp_session_ttl || "—"],
-      ["TCP pending TTL", memory.tcp_pending_ttl || "—"],
-      ["Max TCP sessions", fmtInt(memory.max_tcp_sessions)],
+      ["TCP session TTL", stateful ? (memory.tcp_session_ttl || "—") : "not used (stateless)"],
+      ["TCP pending TTL", stateful ? (memory.tcp_pending_ttl || "—") : "not used (stateless)"],
+      ["Max TCP sessions", stateful ? fmtInt(memory.max_tcp_sessions) : "not used (stateless)"],
       ["FTP state TTL", memory.ftp_state_ttl || "—"],
       ["Profile file", persistence.profile_file || "—"],
       ["Save interval", persistence.save_interval || "—"],
@@ -2243,7 +2249,7 @@
       ),
       el("div", { class: "section-gap" }),
       el("div", { class: "grid-2" },
-        card("Detection", "Preset plus overrides", kvList(detectionPairs)),
+        card("Detection", "Every value is explicit in the configuration file", kvList(detectionPairs)),
         card("Mitigation", "Bounds and lifecycle", kvList(mitigationPairs)),
         card("BGP", "No password is used; for local lab peers only unless protected by network policy", kvList(bgpPairs)),
         card("Alerting", "Webhook URL is redacted", kvList(alertPairs)),
