@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-label="Wireframe of the Dolly Sensor dashboard: overview, protected IPs, inspector, rules and mitigation views">
+  <rect width="1280" height="760" rx="14" fill="#1e1e1e"/>
+  <rect x="18" y="18" width="1244" height="724" rx="10" fill="#171a1d" stroke="#2a3235" stroke-width="2"/>
+
+  <!-- sidebar -->
+  <rect x="18" y="18" width="212" height="724" rx="10" fill="#1e2226"/>
+  <g font-family="ui-monospace,Consolas,monospace" font-size="15" fill="#8b949e">
+    <text x="34" y="52">DOLLY SENSOR</text>
+    <g fill="#e6edf3">
+      <text x="34" y="96">● Overview</text>
+      <text x="34" y="128">Protected IPs</text>
+      <text x="34" y="160">Inspector</text>
+      <text x="34" y="192">Connections</text>
+      <text x="34" y="224">Intelligence</text>
+      <text x="34" y="256">Blocklist</text>
+      <text x="34" y="288">Rules</text>
+      <text x="34" y="320">Mitigation</text>
+      <text x="34" y="352">Settings</text>
+    </g>
+    <text x="34" y="420" fill="#43989d">SIMULATION MODE</text>
+    <text x="34" y="446">BGP disabled</text>
+    <text x="34" y="472">1.0.0</text>
+  </g>
+
+  <!-- KPI cards -->
+  <g font-family="ui-monospace,Consolas,monospace">
+    <g>
+      <rect x="250" y="46" width="180" height="86" rx="8" fill="#1e2226" stroke="#2a3235" stroke-width="1.5"/>
+      <text x="266" y="80" font-size="13" fill="#8b949e">COLLECTOR</text>
+      <text x="266" y="112" font-size="26" font-weight="700" fill="#e6edf3">900</text>
+      <text x="322" y="112" font-size="13" fill="#8b949e">samples</text>
+    </g>
+    <g>
+      <rect x="448" y="46" width="180" height="86" rx="8" fill="#1e2226" stroke="#2a3235" stroke-width="1.5"/>
+      <text x="464" y="80" font-size="13" fill="#8b949e">DETECTION</text>
+      <text x="464" y="112" font-size="26" font-weight="700" fill="#e6edf3">100<tspan font-size="15" fill="#8b949e">/100</tspan></text>
+      <text x="530" y="112" font-size="13" fill="#f85149">● critical</text>
+    </g>
+    <g>
+      <rect x="646" y="46" width="180" height="86" rx="8" fill="#1e2226" stroke="#2a3235" stroke-width="1.5"/>
+      <text x="662" y="80" font-size="13" fill="#8b949e">ACTIONS</text>
+      <text x="662" y="112" font-size="26" font-weight="700" fill="#e6edf3">2</text>
+      <text x="694" y="112" font-size="13" fill="#d29922">simulated</text>
+    </g>
+    <g>
+      <rect x="844" y="46" width="180" height="86" rx="8" fill="#1e2226" stroke="#2a3235" stroke-width="1.5"/>
+      <text x="860" y="80" font-size="13" fill="#8b949e">ALERTS</text>
+      <text x="860" y="112" font-size="26" font-weight="700" fill="#e6edf3">2</text>
+      <text x="892" y="112" font-size="13" fill="#f85149">critical</text>
+    </g>
+    <g>
+      <rect x="1042" y="46" width="180" height="86" rx="8" fill="#1e2226" stroke="#2a3235" stroke-width="1.5"/>
+      <text x="1058" y="80" font-size="13" fill="#8b949e">TRUST</text>
+      <text x="1058" y="112" font-size="26" font-weight="700" fill="#f85149">3<tspan font-size="15" fill="#8b949e">/100</tspan></text>
+      <text x="1110" y="112" font-size="13" fill="#8b949e">top source</text>
+    </g>
+  </g>
+
+  <!-- destination table -->
+  <g font-family="ui-monospace,Consolas,monospace" font-size="14">
+    <rect x="250" y="152" width="972" height="180" rx="8" fill="#1e2226" stroke="#2a3235" stroke-width="1.5"/>
+    <text x="266" y="184" font-size="15" font-weight="700" fill="#e6edf3">PROTECTED DESTINATIONS  —  203.0.113.0/24</text>
+    <rect x="250" y="198" width="972" height="1.5" fill="#2a3235"/>
+    <g fill="#8b949e">
+      <text x="266" y="226">DESTINATION</text>
+      <text x="420" y="226">THREAT</text>
+      <text x="540" y="226">PPS</text>
+      <text x="660" y="226">BPS</text>
+      <text x="780" y="226">BASELINE</text>
+      <text x="940" y="226">SCORE</text>
+      <text x="1080" y="226">WARM-UP</text>
+    </g>
+    <g fill="#e6edf3">
+      <text x="266" y="258">203.0.113.10</text>
+    </g>
+    <rect x="410" y="244" width="76" height="20" rx="10" fill="#4a1f1f"/>
+    <text x="448" y="259" text-anchor="middle" fill="#f85149">attack</text>
+    <text x="540" y="258" fill="#e6edf3">254.0k</text>
+    <text x="660" y="258" fill="#e6edf3">121.9M</text>
+    <text x="780" y="258" fill="#8b949e">257 pps</text>
+    <rect x="920" y="244" width="130" height="20" rx="10" fill="#2b3a3b"/>
+    <text x="985" y="259" text-anchor="middle" fill="#43989d">100 / threshold 70</text>
+    <text x="1080" y="258" fill="#3fb950">done</text>
+    <text x="266" y="300" fill="#8b949e">rep: TCP 100% · port 443 100% · 1 source · 100% pure SYN</text>
+  </g>
+
+  <!-- signals panel -->
+  <g font-family="ui-monospace,Consolas,monospace" font-size="14">
+    <rect x="250" y="352" width="480" height="280" rx="8" fill="#1e2226" stroke="#2a3235" stroke-width="1.5"/>
+    <text x="266" y="384" font-size="15" font-weight="700" fill="#e6edf3">SIGNALS</text>
+    <rect x="250" y="398" width="480" height="1.5" fill="#2a3235"/>
+    <g fill="#e6edf3">
+      <text x="266" y="430">+  254.0k pps = 25.4x office floor</text>
+      <text x="266" y="460">+  216.4 standard deviations above baseline</text>
+      <text x="266" y="490">+  988x its learned baseline</text>
+      <text x="266" y="520">+  tiny packets averaging 40 bytes</text>
+      <text x="266" y="550">+  100% of packets are pure TCP SYN</text>
+      <text x="266" y="580">+  24.9k sampled SYNs, no handshake</text>
+      <text x="266" y="610">+  top source trust 3/100</text>
+    </g>
+  </g>
+
+  <!-- mitigation panel -->
+  <g font-family="ui-monospace,Consolas,monospace" font-size="14">
+    <rect x="750" y="352" width="472" height="280" rx="8" fill="#1e2226" stroke="#2a3235" stroke-width="1.5"/>
+    <text x="766" y="384" font-size="15" font-weight="700" fill="#e6edf3">MITIGATION  —  FLOWSPEC</text>
+    <rect x="750" y="398" width="472" height="1.5" fill="#2a3235"/>
+    <rect x="766" y="416" width="130" height="22" rx="11" fill="#3f2a13"/>
+    <text x="831" y="432" text-anchor="middle" fill="#d29922">simulated</text>
+    <g fill="#e6edf3">
+      <text x="766" y="472">action     discard</text>
+      <text x="766" y="502">source     198.51.100.7/32</text>
+      <text x="766" y="532">dest       203.0.113.10/32</text>
+      <text x="766" y="562">match      proto TCP port 443 flags 0x02</text>
+      <text x="766" y="592">expires    1m0s  ·  withdrawn on expiry</text>
+    </g>
+    <text x="766" y="624" fill="#8b949e">reason: reputation — probable SYN flood</text>
+  </g>
+
+  <text x="250" y="700" font-family="ui-monospace,Consolas,monospace" font-size="13" fill="#6e7681">live over server-sent events · no build step · served by the same Go binary on 127.0.0.1:8080</text>
+</svg>

@@ -43,6 +43,13 @@ the UI. A second binary generates synthetic sFlow for lab use.
 | **Runtime** | Single static binary with embedded dashboard (`dollysensor`), plus `sflowgen` for labs |
 | **License** | MIT |
 
+<p align="center">
+  <img src="docs/dashboard.png" alt="Dolly Sensor dashboard: Overview view with KPIs, a protected destination under attack at score 100/100, volumetric detection signals and a simulated BGP Flowspec discard" width="980">
+</p>
+<p align="center"><em>Rendered layout of the Overview view using values from a real local run (40 B SYN flood at sampling
+1:500, 254k pps at the destination, trust 3/100). The shipping UI is plain HTML served by the binary —
+<a href="#build-and-run">reproduce this exact scenario in under two minutes</a>.</em></p>
+
 ## Why another DDoS sensor?
 
 Most open-source flow-based mitigators are either threshold blackholers — detect a big
@@ -106,6 +113,11 @@ in-kernel XDP drops, inline scrubbing, or multi-tenant management today.
    intelligence, and a full rules engine with an editor, preview, and drag-and-drop
    ordering.
 
+<p align="center">
+  <img src="docs/pipeline.png" alt="Six-stage pipeline: ingest sFlow v5, profile destination and source, detect, decide with guardrails, enforce Flowspec/RTBH, operate through dashboard" width="980">
+</p>
+<p align="center"><em>The same six stages with the values a real run produced end to end.</em></p>
+
 ## Profiling
 
 The sensor never judges a packet in isolation; it judges it against what it has
@@ -130,6 +142,12 @@ Sampling is honored throughout: every observation carries the estimated real pac
 and byte counts implied by the sFlow sampling rate, and all rate and window math uses
 those estimates. The dashboard can therefore show millions of estimated packets while
 the inspector holds only the sampled observations behind them.
+
+<p align="center">
+  <img src="docs/sflow-datagram.png" alt="Hex decode of one sFlow v5 datagram: header with agent 192.0.2.10, flow sample with sampling rate 1:500, raw packet header, Ethernet, IPv4 and TCP SYN fields annotated" width="980">
+</p>
+<p align="center"><em>One datagram, decoded. sFlow sends packet headers, not flows: a switch reports one sampled
+packet per 500, and the sensor multiplies it back to real traffic (2,000 samples/s &rarr; 1.0M pps estimated).</em></p>
 
 ## Rules
 
@@ -305,6 +323,13 @@ layered so that the cheapest, most certain checks run first:
 An **allow rule overrides this entire pipeline for matching traffic** — that is its
 purpose. A conditional rule supplements it with knowledge detection cannot infer.
 
+<p align="center">
+  <img src="docs/scoring.png" alt="Bar chart of the threat score composition for a real SYN flood: PPS floor 25 points, z-score deviation 22, 988x baseline 10, tiny packets 10, pure SYN 18, top source concentration 6, no-handshake 10, low trust 8, raw sum 118 capped at 100" width="980">
+</p>
+<p align="center"><em>The volumetric score of the demo attack, exactly as every contributing rule fired.
+The raw sum is 118 and is deliberately capped at 100; the subject crossed the threshold
+of 70 for five consecutive windows before anything was announced.</em></p>
+
 ## Build and run
 
 Requirements: Go 1.23 or newer.
@@ -340,6 +365,13 @@ mitigation path in a lab without a router.
 > See **[OPERATOR-TUTORIAL.md](OPERATOR-TUTORIAL.md)** for a step-by-step guide to
 > collecting real sFlow, dry-running BGP announcements against a lab peer, arming
 > automatic mitigation on a production edge, and adding standing/conditional rules.
+
+<p align="center">
+  <img src="docs/terminal.png" alt="Terminal session: dollysensor startup in simulation mode, sflowgen SYN flood, two critical alerts with score, volumetric signals and the resulting simulated Flowspec discard" width="980">
+</p>
+<p align="center"><em>What the two-minute lab walk-through actually looks like: collect, detect quietly during
+warm-up, then catch the flood with full evidence. Every number in this output is real —
+the same commands you saw above.</em></p>
 
 ## Safety defaults
 

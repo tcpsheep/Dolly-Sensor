@@ -45,3 +45,12 @@ Dolly Sensor is closest in spirit to FastNetMon, Kapkan and sFlow-RT's ddos-prot
 - Source: `go build ./cmd/dollysensor`
 - Test: `go test ./...`
 - Version: `dollysensor -version`
+
+## Media
+
+- docs/logo.png: project logo
+- docs/dashboard.png: rendered layout of the Overview view with real demo-run values
+- docs/pipeline.png: the six-stage pipeline from sample to Flowspec rule
+- docs/scoring.png: composition of a real threat score (100/100) by contributing rule
+- docs/sflow-datagram.png: byte-level anatomy of one sFlow v5 datagram
+- docs/terminal.png: terminal capture of a full detection lifecycle
