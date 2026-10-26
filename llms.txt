@@ -1,0 +1,47 @@
+# Dolly Sensor
+
+> Dolly Sensor is an open-source sFlow DDoS detection and mitigation controller written in Go. It ingests sFlow v5, builds behavioral profiles of protected destinations and external sources, detects volumetric and protocol attacks with layered checks, and enforces decisions as BGP Flowspec or RTBH announcements driven by a persistent rules engine. It ships as a single static binary with an embedded live dashboard, no external modules, no database and no front-end build step.
+
+## Key facts
+
+- Repository: https://github.com/tcpsheep/Dolly-Sensor
+- Latest release: https://github.com/tcpsheep/Dolly-Sensor/releases/latest (v1.0.0)
+- License: MIT
+- Language: Go 1.23+ (standard library only)
+- Telemetry: sFlow v5 over UDP (default port 6343)
+- Mitigation: BGP Flowspec (RFC 8955/8956) and RTBH (RFC 3882), IPv4
+- Detection: blocklists, TCP state, FTP abuse, source reputation, volumetric scoring, warm-up and trust
+- Policy: persistent rules engine, standing and conditional rules, dashboard editor and JSON API
+- Dashboard: served by the binary over server-sent events, no build step, no authentication
+- Safe defaults: BGP disabled (actions simulated), dashboard on 127.0.0.1:8080, no protect-everything mode
+- Scope: single-operator out-of-band sensor, not an inline firewall or full packet capture system
+
+## Documentation
+
+- [README](README.md): features, configuration reference, dashboard views, troubleshooting
+- [Operator tutorial](OPERATOR-TUTORIAL.md): collect real sFlow, dry-run BGP against a lab peer, arm mitigation
+- [Concept](CONCEPT.md): product intent and behavioral contract
+- [Example configuration](config.example.json)
+
+## Source layout
+
+- `cmd/dollysensor`: sensor binary (collector, detection, mitigation, dashboard)
+- `cmd/sflowgen`: synthetic sFlow v5 generator for lab testing
+- `internal/sflow`: sFlow v5 decoding
+- `internal/packet`: packet and application-layer decoding
+- `internal/intel`: destination profiles, source reputation, persistence
+- `internal/detect`: detection funnel and scoring
+- `internal/rules`: rules engine and persistence
+- `internal/bgp`: Flowspec/RTBH encoding and BGP speaker
+- `internal/mitigate`: action lifecycle, deduplication, expiry
+- `internal/api`, `internal/sensor`: HTTP API, SSE streams, lifecycle
+
+## Comparison
+
+Dolly Sensor is closest in spirit to FastNetMon, Kapkan and sFlow-RT's ddos-protect, but differs in three ways: it is written against the Go standard library only, it learns and persists per-source reputation, and it has a real rules engine with standing and conditional rules managed from the dashboard. See the comparison table in the README.
+
+## Optional
+
+- Source: `go build ./cmd/dollysensor`
+- Test: `go test ./...`
+- Version: `dollysensor -version`

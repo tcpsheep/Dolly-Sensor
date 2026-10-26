@@ -1,36 +1,89 @@
 <div align="center">
 
-<svg width="120" height="72" viewBox="0 0 120 72" xmlns="http://www.w3.org/2000/svg" role="img" alt="Dolly Sensor logo">
-  <rect width="120" height="72" rx="10" fill="#1e1e1e"/>
-  <text x="60" y="32" font-family="monospace" font-size="13" fill="#43989d" text-anchor="middle">▶ DOLLY</text>
-  <text x="60" y="52" font-family="monospace" font-size="10" fill="#cccccc" text-anchor="middle" opacity="0.85">sFlow DDoS · BGP · rules</text>
-</svg>
+<img src="docs/logo.svg" alt="Dolly Sensor — sFlow DDoS detection and BGP Flowspec/RTBH mitigation controller" width="220">
 
-![Status: Active](https://img.shields.io/badge/status-active-2ecc71?style=for-the-badge&labelColor=1e1e1e)
+[![Latest release](https://img.shields.io/github/v/release/tcpsheep/Dolly-Sensor?style=for-the-badge&labelColor=1e1e1e&color=43989d)](https://github.com/tcpsheep/Dolly-Sensor/releases/latest)
 ![Go](https://img.shields.io/badge/Go-1.23%2B-00ad91?style=for-the-badge&logo=go)
-![License: MIT](https://img.shields.io/badge/License-MIT-2ecc71?style=for-the-badge)
+![BGP](https://img.shields.io/badge/BGP-Flowspec%20%2B%20RTBH-43989d?style=for-the-badge)
 ![sFlow](https://img.shields.io/badge/sFlow-DDoS-43989d?style=for-the-badge)
+![License: MIT](https://img.shields.io/badge/License-MIT-2ecc71?style=for-the-badge)
 
 </div>
 
 # Dolly Sensor
 
-> **Postdata:** Dont ripoff this and call it as yours, specially you neoprotect, this is done so kids can learn how propper protection is done
->
-> **About:** Dolly Sensor was built collaboratively with AI assistance. The architecture,
-> detection model, and operational tradeoffs are the human operator's; the AI partner
-> wrote much of the first-draft Go, dashboard UI, and prose. It's honest about being a
-> lab tool, not an enterprise product.
+**Open-source sFlow DDoS detection and mitigation controller with a persistent BGP Flowspec/RTBH rules engine, written in Go.**
 
-Dolly Sensor is a self-contained sFlow DDoS detection and mitigation controller. It
-listens for sampled traffic, builds behavioral profiles of every protected destination
-and external source, detects attacks from a combination of deterministic checks and
-statistical evidence, and — when armed — enforces decisions as BGP Flowspec or RTBH
-announcements to your edge router.
+Dolly Sensor is a self-contained DDoS detection and mitigation system for network
+operators. It listens for sampled traffic, builds behavioral profiles of every protected
+destination and external source, detects attacks from a combination of deterministic
+checks and statistical evidence, and — when armed — enforces decisions as BGP Flowspec or
+RTBH announcements to your edge router.
 
 It is written entirely against the Go standard library: no external modules, no build
 step for the dashboard, no database. One binary ingests, detects, decides, and serves
 the UI. A second binary generates synthetic sFlow for lab use.
+
+> **What makes it different:** a dependency-free supply chain (standard library only),
+> per-source reputation that is learned and survives restarts, and a real rules engine
+> where standing policy is re-announced after every restart, configuration change and
+> BGP session re-establishment.
+
+## At a glance
+
+| | |
+|---|---|
+| **Category** | Out-of-band, flow-based DDoS detection and mitigation |
+| **Telemetry** | sFlow v5 over UDP |
+| **Detection** | Blocklists, TCP state, FTP abuse, source reputation, volumetric scoring, warm-up and trust |
+| **Mitigation** | BGP Flowspec (RFC 8955/8956) and RTBH (RFC 3882), IPv4 |
+| **Policy** | Persistent rules engine: standing and conditional rules, dashboard editor, JSON API |
+| **Dependencies** | Go standard library only — no modules, no database, no JS toolchain |
+| **Runtime** | Single static binary with embedded dashboard (`dollysensor`), plus `sflowgen` for labs |
+| **License** | MIT |
+
+## Why another DDoS sensor?
+
+Most open-source flow-based mitigators are either threshold blackholers — detect a big
+host, announce a /32 — or thin control planes over a third-party BGP daemon. Dolly Sensor
+was built around a different question: *what does the operator know about this network
+that a threshold cannot?* That question is the rules engine, and it is a first-class part
+of the product rather than a configuration file.
+
+| Project | Language | Flow input | Mitigation | Policy surface | Runtime dependencies | License |
+|---|---|---|---|---|---|---|
+| **Dolly Sensor** | Go | sFlow v5 | Flowspec + RTBH | Persistent rules engine (standing/conditional), dashboard + JSON API | None — stdlib only | MIT |
+| [FastNetMon](https://github.com/pavel-odintsov/fastnetmon) | C++ | sFlow, NetFlow, IPFIX, SPAN | BGP blackhole; Flowspec in commercial editions | Per-hostgroup thresholds, scripts, API; web UI in commercial editions | Boost and other C++ libraries, external BGP tooling | GPL-2.0 |
+| [Kapkan](https://github.com/fornex/kapkan) | Go | sFlow, NetFlow, IPFIX | RTBH, Flowspec, XDP drops, scrubbing | Config-driven hostgroups, escalation ladders, embedded console | goflow2, GoBGP (vendored) | Apache-2.0 |
+| [NetDeflect](https://github.com/0vm/NetDeflect) | Python | sFlow/NetFlow in its advanced tier | nftables/XDP, BGP in its advanced tier | Attack signatures and settings file, chat alerts | Python, nftables | Apache-2.0 |
+| [sFlow-RT ddos-protect](https://github.com/sflow-rt/ddos-protect) | JavaScript | sFlow | RTBH + Flowspec | sFlow-RT app with the sFlow-RT UI | Java sFlow-RT + InfluxDB | MIT |
+| [prefixd](https://github.com/lance0/prefixd) | Rust | None — API-driven | Flowspec | Policy daemon; needs an external detector | None | MIT |
+
+*Landscape as of October 2026; corrections are welcome as an issue.*
+
+**Choose Dolly Sensor when** you want one dependency-free binary you can read end to end,
+sFlow is already exported from your edge, and you need per-partner trust with permanent
+policy (never block the monitoring range, always rate-limit that scanner block) rather
+than a pure volume threshold.
+
+**Choose something else when** you need NetFlow/IPFIX ingestion, IPv6 mitigation,
+in-kernel XDP drops, inline scrubbing, or multi-tenant management today.
+
+## Contents
+
+- [What it does](#what-it-does)
+- [Profiling](#profiling)
+- [Rules](#rules)
+- [Automatic detection](#automatic-detection)
+- [Build and run](#build-and-run)
+- [Safety defaults](#safety-defaults)
+- [Configuration](#configuration)
+- [Dashboard](#dashboard)
+- [Tests](#tests)
+- [FAQ](#faq)
+- [Glossary](#glossary)
+- [Troubleshooting](#troubleshooting)
+- [Scope](#scope)
 
 ## What it does
 
@@ -466,6 +519,94 @@ conditional triggering with flow-scoped enforcement, allow-rule suppression, and
 end-to-end observation-to-simulated-Flowspec flow with shutdown withdrawal. No network
 access or external modules are required.
 
+## FAQ
+
+### What is Dolly Sensor?
+
+An open-source sFlow DDoS detection and mitigation controller written in Go. It profiles
+traffic toward protected prefixes, detects attacks, and announces BGP Flowspec or RTBH
+rules to an edge router. It is out-of-band: it does not sit in the forwarding path.
+
+### Is Dolly Sensor a replacement for FastNetMon or sFlow-RT?
+
+It covers the same core job — flow telemetry in, BGP mitigation out — with a different
+design: one dependency-free binary and a persistent operator rules engine instead of a
+threshold configuration or a Java application stack. If you need NetFlow/IPFIX ingestion,
+commercial support, IPv6 mitigation, or in-kernel drops, one of those projects fits
+better today. The comparison table above lists the differences.
+
+### Which flow protocols does it support?
+
+sFlow v5 over UDP. NetFlow and IPFIX are not supported in this release.
+
+### Does it drop traffic itself?
+
+No. It is a control-plane component: it tells your edge router what to filter via BGP
+Flowspec (RFC 8955/8956) or RTBH (RFC 3882). The router enforces it. There is no inline
+data path and no packet capture beyond the sampled payload inside each sFlow record.
+
+### Can I try it without a router?
+
+Yes. BGP is disabled by default and every would-be action is recorded as `simulated`.
+`sflowgen` generates synthetic sFlow v5 traffic, so the full collect → profile → detect →
+decide → dashboard path runs on a laptop. `OPERATOR-TUTORIAL.md` walks through a lab peer
+when you are ready for real announcements.
+
+### Do I need a database or external services?
+
+No. Destination profiles, source reputations, rules and settings are written to local
+JSON files atomically. The dashboard is embedded in the binary. No Redis, no InfluxDB, no
+Prometheus, no message queue, no npm.
+
+### What survives a restart?
+
+Destination profiles, source reputations, manual trust decisions and rules. Recent
+packets, alerts and short-window baselines are in-memory only. Standing rules are
+re-announced automatically after a restart, a configuration change, or a BGP session
+reset.
+
+### How does it handle spoofed sources and false positives?
+
+Sources earn trust by completing TCP handshakes and holding sessions; SYN-only sources
+lose it. Trust raises the evidence required to act but never hides traffic. Internal
+sources are never blocked, allow rules override the whole pipeline, and every automatic
+action is temporary and deduplicated. During warm-up, a new destination has a capped
+score so its first packets cannot trigger mitigation alone.
+
+### Is the dashboard safe to expose?
+
+No — it has no authentication. Keep it on loopback (the default), reach it over an SSH
+tunnel, or put it behind an authenticated reverse proxy.
+
+### Is it production-ready?
+
+It is honest about being a lab-grade tool rather than an enterprise product. The safety
+defaults exist for that reason: dry-run first, review the simulated actions, then arm
+automatic mitigation on a canary prefix before trusting it on a production edge. The
+operator remains responsible for prefixes, BGP policy, communities and cleanup after a
+crash.
+
+### What license is it under?
+
+MIT. Builds and derivative work are welcome as long as the copyright notice is kept.
+
+## Glossary
+
+- **sFlow v5** — a sampling protocol: routers send the *headers* of one packet out of N.
+  Dolly Sensor multiplies every observation by the sampling rate to estimate real packet
+  and byte counts.
+- **Flowspec (RFC 8955/8956)** — a BGP address family that distributes match-and-action
+  filters to routers: match on prefix, protocol, ports, TCP flags, packet length or
+  fragments, then drop, rate-limit or redirect.
+- **RTBH (RFC 3882)** — remotely triggered blackhole: announce a route for a victim or
+  attacker to a discard next-hop, dropping traffic upstream of the target.
+- **Standing rule** — policy that is always active; its Flowspec action is announced
+  immediately and re-announced after restarts.
+- **Conditional rule** — policy that watches a window of traffic and acts only when its
+  thresholds (rate, distinct sources, consecutive windows) are met.
+- **Trust / reputation** — a learned score per external source that changes how much
+  evidence is required before the sensor acts against it.
+
 ## Troubleshooting
 
 - **Dashboard refuses to start** — verify `dashboard.listen` is a literal loopback
@@ -491,3 +632,20 @@ multi-tenant service, or complete IDS. IPv4 mitigation only (Flowspec and RTBH);
 observations are decoded and displayed, while IPv6 announcements are a future
 direction. The operator remains responsible for protected prefixes, BGP policy,
 communities, webhook secrets, and crash-cleanup procedures.
+
+## Project status and attribution
+
+- **Status:** active, single-maintainer. Version 1.0.0 is the first stable release.
+- **AI assistance:** built collaboratively. The architecture, detection model and
+  operational tradeoffs are the human operator's; much of the first-draft Go, dashboard
+  UI and prose were written with an AI partner.
+- **Derivative work:** forks and reuse are welcome under the MIT license — please keep
+  the attribution.
+
+## Links
+
+- Releases and prebuilt binaries: <https://github.com/tcpsheep/Dolly-Sensor/releases>
+- Operator tutorial: [OPERATOR-TUTORIAL.md](OPERATOR-TUTORIAL.md)
+- Design notes: [CONCEPT.md](CONCEPT.md)
+- Machine-readable summary: [llms.txt](llms.txt)
+- License: [MIT](LICENSE)
