@@ -4,8 +4,9 @@ node_modules/
 *.dll
 *.so
 *.dylib
-dollysensor
-sflowgen
+# built binaries at the repository root only (not the cmd/ source directories)
+/dollysensor
+/sflowgen
 *.o
 .DS_Store
 Thumbs.db
