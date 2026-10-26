@@ -91,6 +91,16 @@ func New(capacity int, cooldown time.Duration) *Store {
 	}
 }
 
+// SetCooldown changes the alert coalescing window at runtime.
+func (s *Store) SetCooldown(cooldown time.Duration) {
+	if cooldown < 0 {
+		cooldown = 0
+	}
+	s.mu.Lock()
+	s.cooldown = cooldown
+	s.mu.Unlock()
+}
+
 // Record stores or coalesces an alert. It returns the resulting alert, whether
 // a new record was created, and whether this observation upgraded the record to
 // critical. Callers use the last flag to notify on severity escalation without

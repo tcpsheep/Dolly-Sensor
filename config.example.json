@@ -21,7 +21,117 @@
     "threshold": 70,
     "persistence": 5,
     "pps_floor": 10000,
-    "bps_floor": 100000000
+    "bps_floor": 100000000,
+    "signals": {
+      "pps_points": 10,
+      "pps_log_cap": 15,
+      "pps_log_scale": 5,
+      "bps_points": 8,
+      "bps_log_cap": 12,
+      "bps_log_scale": 4,
+      "z_score_tiers": [
+        { "min": 6, "points": 22 },
+        { "min": 4, "points": 18 },
+        { "min": 3, "points": 14 },
+        { "min": 2, "points": 8 },
+        { "min": 1.5, "points": 4 }
+      ],
+      "baseline_ratio_tiers": [
+        { "min": 20, "points": 10 },
+        { "min": 8, "points": 6 }
+      ],
+      "baseline_alpha": 0.04,
+      "baseline_skip_floor_multiple": 4,
+      "baseline_skip_baseline_multiple": 8,
+      "small_packet_tiers": [
+        { "min": 80, "points": 10 },
+        { "min": 120, "points": 6 },
+        { "min": 200, "points": 3 }
+      ],
+      "signal_volume_gate": 0.5,
+      "malformed_share_tiers": [
+        { "min": 0.6, "points": 12 },
+        { "min": 0.3, "points": 7 },
+        { "min": 0.15, "points": 3 }
+      ],
+      "syn_share_tiers": [
+        { "min": 0.8, "points": 18 },
+        { "min": 0.6, "points": 12 },
+        { "min": 0.4, "points": 6 }
+      ],
+      "syn_ack_count_min": 100,
+      "syn_ack_count_ratio": 4,
+      "syn_ack_count_points": 6,
+      "src_syn_min": 100,
+      "src_syn_ack_ratio": 10,
+      "src_syn_share_min": 0.5,
+      "src_syn_ack_points": 10,
+      "psh_ack_min": 100,
+      "psh_ack_ratio": 8,
+      "psh_ack_points": 8,
+      "udp_share_tiers": [
+        { "min": 0.8, "points": 10 },
+        { "min": 0.6, "points": 6 }
+      ],
+      "icmp_share_min": 0.5,
+      "icmp_points": 5,
+      "ttl_distinct_min": 8,
+      "ttl_distinct_points": 6,
+      "distributed_sources_min": 1000,
+      "distributed_sources_points": 8,
+      "source_overflow_points": 4,
+      "top_share_tiers": [
+        { "min": 0.8, "points": 6 },
+        { "min": 0.6, "points": 4 }
+      ],
+      "low_trust_tiers": [
+        { "min": 20, "points": 8 },
+        { "min": 40, "points": 4 }
+      ],
+      "high_trust_min": 80,
+      "high_trust_discount": 8,
+      "trusted_discount": 12,
+      "warmup_score_cap": 45,
+      "smoothing_history": 0.6,
+      "arm_gate_factor": 0.25,
+      "calm_factor": 0.5,
+      "calm_windows": 5,
+      "warmup_volume_multiple": 2,
+      "warmup_extreme_multiple": 4,
+      "warmup_syn_share": 0.6,
+      "rep_syn_top_share": 0.5,
+      "rep_syn_min": 100,
+      "rep_syn_ack_ratio": 10,
+      "rep_syn_share_min": 0.6,
+      "rep_syn_min_pps": 200,
+      "rep_discard_multiple": 2,
+      "precise_source_share": 0.6,
+      "strong_score_bonus": 15,
+      "strong_syn_share": 0.5,
+      "strong_trust_below": 40,
+      "dominant_port_share": 0.8,
+      "trusted_strong_syn_share": 0.85,
+      "trusted_strong_pps_multiple": 20,
+      "trusted_strong_syn_pps_multiple": 5,
+      "trusted_strong_score_bonus": 25,
+      "rtbh_syn_share": 0.5,
+      "rtbh_top_share": 0.9,
+      "rtbh_syn_min": 1000,
+      "rtbh_syn_ack_ratio": 20,
+      "rtbh_score_bonus": 20,
+      "rtbh_pps_multiple": 200,
+      "rtbh_min_pps": 1000000,
+      "rtbh_bps_multiple": 50,
+      "rtbh_min_bps": 1000000000
+    },
+    "sweep": {
+      "enabled": true,
+      "min_destinations": 16,
+      "prefix_bits": 24,
+      "min_packets": 200,
+      "action": "rate-limit",
+      "ttl_min_packets": 100
+    }
   },
   "mitigation": {
     "blocklist_dir": "./examples/blocklists",

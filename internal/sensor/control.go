@@ -37,7 +37,7 @@ func (s *Sensor) evaluationLoop(ctx context.Context) {
 // evaluateOnce runs one detection round. The evaluation loop calls it; tests
 // may call it directly to advance detection without waiting for wall time.
 func (s *Sensor) evaluateOnce(now time.Time) {
-	window := s.cfg.Detection.RateWindowSeconds
+	window := s.detection().RateWindowSeconds
 	snapshots := s.aggregate.SnapshotAll(now, window)
 	results := s.detector.Evaluate(now, snapshots)
 	for _, result := range results {
@@ -50,6 +50,9 @@ func (s *Sensor) evaluateOnce(now time.Time) {
 		for _, finding := range result.Findings {
 			s.enqueueFinding(finding, now)
 		}
+	}
+	for _, finding := range s.evaluateSweeps(now) {
+		s.enqueueFinding(finding, now)
 	}
 	if s.ruleStore != nil {
 		for _, trigger := range s.ruleStore.Tick(now) {

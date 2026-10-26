@@ -95,6 +95,12 @@ type DetectionConfig struct {
 	Persistence         int      `json:"persistence"`
 	PPSFloor            float64  `json:"pps_floor"`
 	BPSFloor            float64  `json:"bps_floor"`
+	// Signals exposes every rate, share, asymmetry, and score weight the
+	// detector uses. All of it is live-tunable from the dashboard.
+	Signals SignalsConfig `json:"signals"`
+	// Sweep configures cross-destination detection: one source spraying many
+	// protected IPs (carpet bombing) and per-source TTL entropy.
+	Sweep SweepConfig `json:"sweep"`
 }
 
 // Default detection tuning. These are ordinary starting values, not presets:
@@ -105,6 +111,448 @@ const (
 	DefaultPPSFloor        = 10_000.0
 	DefaultBPSFloor        = 100_000_000.0
 )
+
+// SignalTier is one rung of a threshold ladder: the signal scores Points when
+// the measured value is at or beyond Min. Tiers are evaluated in order and the
+// first match wins, so list them from most to least extreme.
+type SignalTier struct {
+	Min    float64 `json:"min"`
+	Points float64 `json:"points"`
+}
+
+// SignalsConfig holds every tuning constant of the scoring funnel. The meaning
+// of Min depends on the ladder: a share tier fires at share >= Min, a
+// small-packet tier at size <= Min, a low-trust tier at trust < Min, and a
+// z-score or baseline-ratio tier at value >= Min.
+type SignalsConfig struct {
+	// Volumetric floors.
+	PPSPoints   float64 `json:"pps_points"`
+	PPSLogCap   float64 `json:"pps_log_cap"`
+	PPSLogScale float64 `json:"pps_log_scale"`
+	BPSPoints   float64 `json:"bps_points"`
+	BPSLogCap   float64 `json:"bps_log_cap"`
+	BPSLogScale float64 `json:"bps_log_scale"`
+
+	// Statistical baseline.
+	ZScoreTiers                  []SignalTier `json:"z_score_tiers"`
+	BaselineRatioTiers           []SignalTier `json:"baseline_ratio_tiers"`
+	BaselineAlpha                float64      `json:"baseline_alpha"`
+	BaselineSkipFloorMultiple    float64      `json:"baseline_skip_floor_multiple"`
+	BaselineSkipBaselineMultiple float64      `json:"baseline_skip_baseline_multiple"`
+
+	// Packet shape.
+	SmallPacketTiers    []SignalTier `json:"small_packet_tiers"`
+	SignalVolumeGate    float64      `json:"signal_volume_gate"`
+	MalformedShareTiers []SignalTier `json:"malformed_share_tiers"`
+
+	// TCP flag evidence.
+	SynShareTiers     []SignalTier `json:"syn_share_tiers"`
+	SynACKCountMin    uint64       `json:"syn_ack_count_min"`
+	SynACKCountRatio  float64      `json:"syn_ack_count_ratio"`
+	SynACKCountPoints float64      `json:"syn_ack_count_points"`
+	SrcSynMin         uint64       `json:"src_syn_min"`
+	SrcSynACKRatio    float64      `json:"src_syn_ack_ratio"`
+	SrcSynShareMin    float64      `json:"src_syn_share_min"`
+	SrcSynACKPoints   float64      `json:"src_syn_ack_points"`
+
+	// PSH-ACK:pure-ACK asymmetry. A healthy conversation carries both data
+	// pushes (PSH-ACK) and receiver acknowledgements (pure ACK) from the same
+	// source in comparable amounts; a source whose PSH-ACKs outnumber its pure
+	// ACKs by PshAckRatio with at least PshAckMin samples is a one-way blast.
+	PshAckMin    uint64  `json:"psh_ack_min"`
+	PshAckRatio  float64 `json:"psh_ack_ratio"`
+	PshAckPoints float64 `json:"psh_ack_points"`
+
+	// Protocol mix.
+	UDPShareTiers []SignalTier `json:"udp_share_tiers"`
+	ICMPShareMin  float64      `json:"icmp_share_min"`
+	ICMPPoints    float64      `json:"icmp_points"`
+
+	// TTL entropy. Legitimate stacks emit a near-constant TTL; many distinct
+	// TTL values from the same traffic are forged or randomised.
+	TTLDistinctMin    int     `json:"ttl_distinct_min"`
+	TTLDistinctPoints float64 `json:"ttl_distinct_points"`
+
+	// Source distribution.
+	DistributedSourcesMin    int          `json:"distributed_sources_min"`
+	DistributedSourcesPoints float64      `json:"distributed_sources_points"`
+	SourceOverflowPoints     float64      `json:"source_overflow_points"`
+	TopShareTiers            []SignalTier `json:"top_share_tiers"`
+
+	// Trust adjustments.
+	LowTrustTiers     []SignalTier `json:"low_trust_tiers"`
+	HighTrustMin      float64      `json:"high_trust_min"`
+	HighTrustDiscount float64      `json:"high_trust_discount"`
+	TrustedDiscount   float64      `json:"trusted_discount"`
+
+	// Attack-state machine.
+	WarmupScoreCap   float64 `json:"warmup_score_cap"`
+	SmoothingHistory float64 `json:"smoothing_history"`
+	ArmGateFactor    float64 `json:"arm_gate_factor"`
+	CalmFactor       float64 `json:"calm_factor"`
+	CalmWindows      int     `json:"calm_windows"`
+
+	// Warm-up observation (alert only, no statistical mitigation).
+	WarmupVolumeMultiple  float64 `json:"warmup_volume_multiple"`
+	WarmupExtremeMultiple float64 `json:"warmup_extreme_multiple"`
+	WarmupSynShare        float64 `json:"warmup_syn_share"`
+
+	// Behavioural reputation layer (fires before statistical persistence).
+	RepSynTopShare     float64 `json:"rep_syn_top_share"`
+	RepSynMin          uint64  `json:"rep_syn_min"`
+	RepSynACKRatio     float64 `json:"rep_syn_ack_ratio"`
+	RepSynShareMin     float64 `json:"rep_syn_share_min"`
+	RepSynMinPPS       float64 `json:"rep_syn_min_pps"`
+	RepDiscardMultiple float64 `json:"rep_discard_multiple"`
+
+	// Volumetric finding shaping.
+	PreciseSourceShare        float64 `json:"precise_source_share"`
+	StrongScoreBonus          float64 `json:"strong_score_bonus"`
+	StrongSynShare            float64 `json:"strong_syn_share"`
+	StrongTrustBelow          float64 `json:"strong_trust_below"`
+	DominantPortShare         float64 `json:"dominant_port_share"`
+	TrustedStrongSynShare     float64 `json:"trusted_strong_syn_share"`
+	TrustedStrongPPSMultiple  float64 `json:"trusted_strong_pps_multiple"`
+	TrustedStrongSynPPSMultiple float64 `json:"trusted_strong_syn_pps_multiple"`
+	TrustedStrongScoreBonus   float64 `json:"trusted_strong_score_bonus"`
+
+	// Remotely-triggered black hole gating (deliberately rare).
+	RTBHSynShare    float64 `json:"rtbh_syn_share"`
+	RTBHTopShare    float64 `json:"rtbh_top_share"`
+	RTBHSynMin      uint64  `json:"rtbh_syn_min"`
+	RTBHSynACKRatio float64 `json:"rtbh_syn_ack_ratio"`
+	RTBHScoreBonus  float64 `json:"rtbh_score_bonus"`
+	RTBHPPSMultiple float64 `json:"rtbh_pps_multiple"`
+	RTBHMinPPS      float64 `json:"rtbh_min_pps"`
+	RTBHBPSMultiple float64 `json:"rtbh_bps_multiple"`
+	RTBHMinBPS      float64 `json:"rtbh_min_bps"`
+}
+
+// SweepConfig controls the cross-destination sweep layer: one external source
+// touching many protected destinations (carpet bombing / subnet scanning) and
+// per-source TTL randomisation.
+type SweepConfig struct {
+	Enabled        bool   `json:"enabled"`
+	MinDestinations int   `json:"min_destinations"`
+	PrefixBits     int    `json:"prefix_bits"`
+	MinPackets     uint64 `json:"min_packets"`
+	// Action is the mitigation proposed for a confirmed sweep: "none",
+	// "rate-limit" (default), or "discard".
+	Action        string `json:"action"`
+	TTLMinPackets uint64 `json:"ttl_min_packets"`
+}
+
+// DefaultSignals returns the default scoring tuning. These mirror the values
+// the detector historically hardcoded; every one is operator-tunable.
+func DefaultSignals() SignalsConfig {
+	return SignalsConfig{
+		PPSPoints:   10,
+		PPSLogCap:   15,
+		PPSLogScale: 5,
+		BPSPoints:   8,
+		BPSLogCap:   12,
+		BPSLogScale: 4,
+
+		ZScoreTiers: []SignalTier{
+			{Min: 6, Points: 22},
+			{Min: 4, Points: 18},
+			{Min: 3, Points: 14},
+			{Min: 2, Points: 8},
+			{Min: 1.5, Points: 4},
+		},
+		BaselineRatioTiers: []SignalTier{
+			{Min: 20, Points: 10},
+			{Min: 8, Points: 6},
+		},
+		BaselineAlpha:                0.04,
+		BaselineSkipFloorMultiple:    4,
+		BaselineSkipBaselineMultiple: 8,
+
+		SmallPacketTiers: []SignalTier{
+			{Min: 80, Points: 10},
+			{Min: 120, Points: 6},
+			{Min: 200, Points: 3},
+		},
+		SignalVolumeGate: 0.5,
+		MalformedShareTiers: []SignalTier{
+			{Min: 0.6, Points: 12},
+			{Min: 0.3, Points: 7},
+			{Min: 0.15, Points: 3},
+		},
+
+		SynShareTiers: []SignalTier{
+			{Min: 0.8, Points: 18},
+			{Min: 0.6, Points: 12},
+			{Min: 0.4, Points: 6},
+		},
+		SynACKCountMin:    100,
+		SynACKCountRatio:  4,
+		SynACKCountPoints: 6,
+		SrcSynMin:         100,
+		SrcSynACKRatio:    10,
+		SrcSynShareMin:    0.5,
+		SrcSynACKPoints:   10,
+
+		PshAckMin:    100,
+		PshAckRatio:  8,
+		PshAckPoints: 8,
+
+		UDPShareTiers: []SignalTier{
+			{Min: 0.8, Points: 10},
+			{Min: 0.6, Points: 6},
+		},
+		ICMPShareMin: 0.5,
+		ICMPPoints:   5,
+
+		TTLDistinctMin:    8,
+		TTLDistinctPoints: 6,
+
+		DistributedSourcesMin:    1000,
+		DistributedSourcesPoints: 8,
+		SourceOverflowPoints:     4,
+		TopShareTiers: []SignalTier{
+			{Min: 0.8, Points: 6},
+			{Min: 0.6, Points: 4},
+		},
+
+		LowTrustTiers: []SignalTier{
+			{Min: 20, Points: 8},
+			{Min: 40, Points: 4},
+		},
+		HighTrustMin:      80,
+		HighTrustDiscount: 8,
+		TrustedDiscount:   12,
+
+		WarmupScoreCap:   45,
+		SmoothingHistory: 0.6,
+		ArmGateFactor:    0.25,
+		CalmFactor:       0.5,
+		CalmWindows:      5,
+
+		WarmupVolumeMultiple:  2,
+		WarmupExtremeMultiple: 4,
+		WarmupSynShare:        0.6,
+
+		RepSynTopShare:     0.5,
+		RepSynMin:          100,
+		RepSynACKRatio:     10,
+		RepSynShareMin:     0.6,
+		RepSynMinPPS:       200,
+		RepDiscardMultiple: 2,
+
+		PreciseSourceShare:      0.6,
+		StrongScoreBonus:        15,
+		StrongSynShare:          0.5,
+		StrongTrustBelow:        40,
+		DominantPortShare:       0.8,
+		TrustedStrongSynShare:   0.85,
+		TrustedStrongPPSMultiple: 20,
+		TrustedStrongSynPPSMultiple: 5,
+		TrustedStrongScoreBonus:  25,
+
+		RTBHSynShare:    0.5,
+		RTBHTopShare:    0.9,
+		RTBHSynMin:      1000,
+		RTBHSynACKRatio: 20,
+		RTBHScoreBonus:  20,
+		RTBHPPSMultiple: 200,
+		RTBHMinPPS:      1_000_000,
+		RTBHBPSMultiple: 50,
+		RTBHMinBPS:      1_000_000_000,
+	}
+}
+
+// LowTrustTierFloor returns the trust score below which a source counts as
+// plainly untrusted: the least extreme low-trust tier, or a sane fallback when
+// the operator removed the tiers entirely.
+func (s SignalsConfig) LowTrustTierFloor() float64 {
+	if len(s.LowTrustTiers) == 0 {
+		return 20
+	}
+	return s.LowTrustTiers[len(s.LowTrustTiers)-1].Min
+}
+
+// DefaultSweep returns the default carpet-bomb detection tuning.
+func DefaultSweep() SweepConfig {
+	return SweepConfig{
+		Enabled:         true,
+		MinDestinations: 16,
+		PrefixBits:      24,
+		MinPackets:      200,
+		Action:          "rate-limit",
+		TTLMinPackets:   100,
+	}
+}
+
+// NormalizeDetection fills safe defaults for any unset field so a partial
+// configuration (or a dashboard payload) still yields a fully specified
+// detector. It never overrides a field the operator set explicitly.
+func NormalizeDetection(d DetectionConfig) DetectionConfig {
+	if d.Threshold <= 0 {
+		d.Threshold = DefaultThreatThreshold
+	}
+	if d.Persistence < 1 {
+		d.Persistence = DefaultPersistence
+	}
+	if d.PPSFloor <= 0 {
+		d.PPSFloor = DefaultPPSFloor
+	}
+	if d.BPSFloor <= 0 {
+		d.BPSFloor = DefaultBPSFloor
+	}
+	if d.WarmupWindows < 1 {
+		d.WarmupWindows = 30
+	}
+	if d.TrustExemptionScore <= 0 {
+		d.TrustExemptionScore = 70
+	}
+	if len(d.Signals.ZScoreTiers) == 0 && d.Signals.PPSPoints <= 0 {
+		d.Signals = DefaultSignals()
+	}
+	if d.Sweep.MinDestinations < 1 {
+		d.Sweep = DefaultSweep()
+	}
+	if d.Sweep.PrefixBits < 8 || d.Sweep.PrefixBits > 128 {
+		d.Sweep.PrefixBits = 24
+	}
+	switch d.Sweep.Action {
+	case "none", "rate-limit", "discard":
+	default:
+		d.Sweep.Action = "rate-limit"
+	}
+	return d
+}
+
+// ValidateDetection checks one detection configuration. It is used both at
+// load time and when the dashboard applies live tuning.
+func ValidateDetection(d DetectionConfig) error {
+	var errs []error
+	if d.EvaluationInterval <= 0 {
+		errs = append(errs, errors.New("detection.evaluation_interval must be positive"))
+	}
+	if d.RateWindowSeconds < 1 || d.RateWindowSeconds > 60 {
+		errs = append(errs, errors.New("detection.rate_window_seconds must be between 1 and 60"))
+	}
+	if d.Cooldown < 0 {
+		errs = append(errs, errors.New("detection.cooldown must not be negative"))
+	}
+	if d.WarmupWindows < 1 {
+		errs = append(errs, errors.New("detection.warmup_windows must be at least 1"))
+	}
+	if d.TrustExemptionScore < 0 || d.TrustExemptionScore > 100 {
+		errs = append(errs, errors.New("detection.trust_exemption_score must be between 0 and 100"))
+	}
+	if d.Threshold < 1 || d.Threshold > 100 {
+		errs = append(errs, errors.New("detection.threshold must be between 1 and 100"))
+	}
+	if d.Persistence < 1 {
+		errs = append(errs, errors.New("detection.persistence must be at least 1"))
+	}
+	if d.PPSFloor <= 0 {
+		errs = append(errs, errors.New("detection.pps_floor must be positive"))
+	}
+	if d.BPSFloor <= 0 {
+		errs = append(errs, errors.New("detection.bps_floor must be positive"))
+	}
+	s := d.Signals
+	tierLists := map[string][]SignalTier{
+		"detection.signals.z_score_tiers":        s.ZScoreTiers,
+		"detection.signals.baseline_ratio_tiers": s.BaselineRatioTiers,
+		"detection.signals.small_packet_tiers":   s.SmallPacketTiers,
+		"detection.signals.malformed_share_tiers": s.MalformedShareTiers,
+		"detection.signals.syn_share_tiers":      s.SynShareTiers,
+		"detection.signals.udp_share_tiers":      s.UDPShareTiers,
+		"detection.signals.top_share_tiers":      s.TopShareTiers,
+		"detection.signals.low_trust_tiers":      s.LowTrustTiers,
+	}
+	shareLists := map[string]bool{
+		"detection.signals.malformed_share_tiers": true,
+		"detection.signals.syn_share_tiers":       true,
+		"detection.signals.udp_share_tiers":       true,
+		"detection.signals.top_share_tiers":       true,
+	}
+	// Inverted ladders fire when the value falls below the threshold, so their
+	// most extreme rung is the smallest threshold.
+	invertedLists := map[string]bool{
+		"detection.signals.small_packet_tiers": true,
+		"detection.signals.low_trust_tiers":    true,
+	}
+	for name, tiers := range tierLists {
+		if len(tiers) > 8 {
+			errs = append(errs, errors.New(name+" must not have more than 8 tiers"))
+		}
+		for i, tier := range tiers {
+			if tier.Points < 0 {
+				errs = append(errs, fmt.Errorf("%s tier %d must not have negative points", name, i+1))
+			}
+			if shareLists[name] && (tier.Min <= 0 || tier.Min > 1) {
+				errs = append(errs, fmt.Errorf("%s tier %d must use a share between 0 and 1", name, i+1))
+			}
+			if tier.Min < 0 {
+				errs = append(errs, fmt.Errorf("%s tier %d must not use a negative threshold", name, i+1))
+			}
+			if i > 0 {
+				previous := tiers[i-1].Min
+				ordered := previous > tier.Min
+				if invertedLists[name] {
+					ordered = previous < tier.Min
+				}
+				if !ordered {
+					errs = append(errs, fmt.Errorf("%s must be ordered from most to least extreme", name))
+				}
+			}
+		}
+	}
+	if s.BaselineAlpha <= 0 || s.BaselineAlpha > 1 {
+		errs = append(errs, errors.New("detection.signals.baseline_alpha must be between 0 (exclusive) and 1"))
+	}
+	if s.SmoothingHistory < 0 || s.SmoothingHistory >= 1 {
+		errs = append(errs, errors.New("detection.signals.smoothing_history must be between 0 and 1 (exclusive)"))
+	}
+	if s.CalmWindows < 1 {
+		errs = append(errs, errors.New("detection.signals.calm_windows must be at least 1"))
+	}
+	for field, value := range map[string]float64{
+		"syn_ack_count_ratio": s.SynACKCountRatio,
+		"src_syn_ack_ratio":   s.SrcSynACKRatio,
+		"psh_ack_ratio":       s.PshAckRatio,
+		"rep_syn_ack_ratio":   s.RepSynACKRatio,
+		"rtbh_syn_ack_ratio":  s.RTBHSynACKRatio,
+	} {
+		if value <= 0 {
+			errs = append(errs, fmt.Errorf("detection.signals.%s must be positive", field))
+		}
+	}
+	for field, value := range map[string]float64{
+		"signal_volume_gate": s.SignalVolumeGate,
+		"arm_gate_factor":    s.ArmGateFactor,
+		"calm_factor":        s.CalmFactor,
+		"src_syn_share_min":  s.SrcSynShareMin,
+		"rep_syn_top_share":  s.RepSynTopShare,
+		"rep_syn_share_min":  s.RepSynShareMin,
+		"precise_source_share": s.PreciseSourceShare,
+		"strong_syn_share":     s.StrongSynShare,
+		"dominant_port_share":  s.DominantPortShare,
+		"trusted_strong_syn_share": s.TrustedStrongSynShare,
+		"rtbh_syn_share":      s.RTBHSynShare,
+		"rtbh_top_share":      s.RTBHTopShare,
+		"warmup_syn_share":    s.WarmupSynShare,
+		"icmp_share_min":      s.ICMPShareMin,
+	} {
+		if value < 0 || value > 1 {
+			errs = append(errs, fmt.Errorf("detection.signals.%s must be between 0 and 1", field))
+		}
+	}
+	if d.Sweep.PrefixBits < 8 || d.Sweep.PrefixBits > 128 {
+		errs = append(errs, errors.New("detection.sweep.prefix_bits must be between 8 and 128"))
+	}
+	switch d.Sweep.Action {
+	case "none", "rate-limit", "discard":
+	default:
+		errs = append(errs, errors.New("detection.sweep.action must be none, rate-limit, or discard"))
+	}
+	return errors.Join(errs...)
+}
 
 type MitigationConfig struct {
 	BlocklistDir    string   `json:"blocklist_dir"`
@@ -191,6 +639,8 @@ func Default() Config {
 			Persistence:         DefaultPersistence,
 			PPSFloor:            DefaultPPSFloor,
 			BPSFloor:            DefaultBPSFloor,
+			Signals:             DefaultSignals(),
+			Sweep:               DefaultSweep(),
 		},
 		Mitigation: MitigationConfig{
 			BlocklistDir:    "./blocklists",
@@ -302,32 +752,8 @@ func (c *Config) Validate() ([]string, error) {
 	if _, err := netutil.ParsePrefixes(c.TrustedSources); err != nil {
 		errs = append(errs, fmt.Errorf("trusted_sources: %w", err))
 	}
-	if c.Detection.EvaluationInterval <= 0 {
-		errs = append(errs, errors.New("detection.evaluation_interval must be positive"))
-	}
-	if c.Detection.RateWindowSeconds < 1 || c.Detection.RateWindowSeconds > 60 {
-		errs = append(errs, errors.New("detection.rate_window_seconds must be between 1 and 60"))
-	}
-	if c.Detection.Cooldown < 0 {
-		errs = append(errs, errors.New("detection.cooldown must not be negative"))
-	}
-	if c.Detection.WarmupWindows < 1 {
-		errs = append(errs, errors.New("detection.warmup_windows must be at least 1"))
-	}
-	if c.Detection.TrustExemptionScore < 0 || c.Detection.TrustExemptionScore > 100 {
-		errs = append(errs, errors.New("detection.trust_exemption_score must be between 0 and 100"))
-	}
-	if c.Detection.Threshold < 1 || c.Detection.Threshold > 100 {
-		errs = append(errs, errors.New("detection.threshold must be between 1 and 100"))
-	}
-	if c.Detection.Persistence < 1 {
-		errs = append(errs, errors.New("detection.persistence must be at least 1"))
-	}
-	if c.Detection.PPSFloor <= 0 {
-		errs = append(errs, errors.New("detection.pps_floor must be positive"))
-	}
-	if c.Detection.BPSFloor <= 0 {
-		errs = append(errs, errors.New("detection.bps_floor must be positive"))
+	if err := ValidateDetection(c.Detection); err != nil {
+		errs = append(errs, err)
 	}
 
 	if strings.TrimSpace(c.Mitigation.BlocklistDir) == "" {

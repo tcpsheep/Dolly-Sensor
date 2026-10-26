@@ -28,7 +28,8 @@ Edit `config.json`:
   "sflow": { "listen": "0.0.0.0:6343" },
   "dashboard": { "listen": "127.0.0.1:8080" },
   "protected_cidrs": ["203.0.113.0/24", "198.51.100.0/24"],   // your real prefixes
-  "detection": { "threshold": 70, "persistence": 5, "pps_floor": 50000, "bps_floor": 1000000000 },
+  "detection": { "threshold": 70, "persistence": 5, "pps_floor": 50000, "bps_floor": 1000000000,
+                 "sweep": { "enabled": true, "min_destinations": 16, "action": "rate-limit" } },
   "mitigation": {
     "auto_block": false,                                     // stay in simulation
     "rate_limit_mbps": 100,
@@ -41,7 +42,10 @@ Edit `config.json`:
 Point your exporters at the sensor's sFlow port. Generate a few minutes of background
 traffic and watch the Overview and Destination detail pages populate. At this stage the
 dashboard shows real estimated packet/byte counts and learned reputations, but BGP
-stays disabled: every mitigation shows as `simulated`.
+stays disabled: every mitigation shows as `simulated`. The **Detection** view lets you
+retune every rate, asymmetry, and score weight live — including the PSH-ACK:pure-ACK
+ratio, carpet-bomb thresholds, and TTL entropy — without restarting; mirror the values
+you settle on into `config.json` to make them durable.
 
 ## 3. Dry-run announcements against a lab peer
 

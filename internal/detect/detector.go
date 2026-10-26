@@ -27,7 +27,7 @@ import (
 // Intel supplies reputation facts without coupling detection to persistence.
 type Intel interface {
 	TrustScore(dst, src netip.Addr) float64
-	SourceSummary(dst, src netip.Addr) (syn, ack uint64, trust float64, manual bool)
+	SourceSummary(dst, src netip.Addr) (syn, ack, pshAck, pureAck uint64, trust float64, manual bool)
 }
 
 // Options configures the detector.
@@ -118,42 +118,34 @@ type Detector struct {
 
 // New builds a detector from configuration.
 func New(opts Options) *Detector {
-	threshold := opts.Detection.Threshold
-	if threshold <= 0 {
-		threshold = config.DefaultThreatThreshold
-	}
-	persistence := opts.Detection.Persistence
-	if persistence < 1 {
-		persistence = config.DefaultPersistence
-	}
-	ppsFloor := opts.Detection.PPSFloor
-	if ppsFloor <= 0 {
-		ppsFloor = config.DefaultPPSFloor
-	}
-	bpsFloor := opts.Detection.BPSFloor
-	if bpsFloor <= 0 {
-		bpsFloor = config.DefaultBPSFloor
-	}
-	opts.Detection.Threshold = threshold
-	opts.Detection.Persistence = persistence
-	opts.Detection.PPSFloor = ppsFloor
-	opts.Detection.BPSFloor = bpsFloor
+	opts.Detection = config.NormalizeDetection(opts.Detection)
 	d := &Detector{
 		cfg:          opts.Detection,
 		intel:        opts.Intel,
 		protected:    opts.Protected,
 		trusted:      opts.Trusted,
-		threshold:    threshold,
-		persistence:  persistence,
-		ppsFloor:     ppsFloor,
-		bpsFloor:     bpsFloor,
+		threshold:    opts.Detection.Threshold,
+		persistence:  opts.Detection.Persistence,
+		ppsFloor:     opts.Detection.PPSFloor,
+		bpsFloor:     opts.Detection.BPSFloor,
 		trustExempt:  opts.Detection.TrustExemptionScore,
 		destinations: map[netip.Addr]*baseline{},
 	}
-	if d.trustExempt <= 0 {
-		d.trustExempt = 70
-	}
 	return d
+}
+
+// Update applies new detection tuning at runtime. Baselines and learned state
+// are preserved; only thresholds, weights, and gates change.
+func (d *Detector) Update(opts Options) {
+	opts.Detection = config.NormalizeDetection(opts.Detection)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg = opts.Detection
+	d.threshold = opts.Detection.Threshold
+	d.persistence = opts.Detection.Persistence
+	d.ppsFloor = opts.Detection.PPSFloor
+	d.bpsFloor = opts.Detection.BPSFloor
+	d.trustExempt = opts.Detection.TrustExemptionScore
 }
 
 // Parameters returns effective tuning.
@@ -174,6 +166,10 @@ func (d *Detector) warmupWindows() int {
 		return 30
 	}
 	return d.cfg.WarmupWindows
+}
+
+func (d *Detector) signals() config.SignalsConfig {
+	return d.cfg.Signals
 }
 
 // Evaluate processes one round of destination snapshots.
@@ -246,16 +242,17 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot) Resul
 	icmpShare := protocolShares["ICMP"] + protocolShares["ICMPv6"]
 	dominantPort, dominantPortShare := topPort(recent.DestPorts, total)
 
-	var topSyn, topACK uint64
+	var topSyn, topACK, topPshAck, topPureAck uint64
 	var topTrust float64
 	var topManual bool
 	if top.SourceAddr.IsValid() && d.intel != nil {
-		topSyn, topACK, topTrust, topManual = d.intel.SourceSummary(dst, top.SourceAddr)
+		topSyn, topACK, topPshAck, topPureAck, topTrust, topManual = d.intel.SourceSummary(dst, top.SourceAddr)
 	}
 	topGloballyTrusted := d.trusted != nil && top.SourceAddr.IsValid() && d.trusted.Contains(top.SourceAddr)
 	topSourceInternal := d.protected != nil && top.SourceAddr.IsValid() && d.protected.Contains(top.SourceAddr)
 	trustedTop := topManual || topGloballyTrusted || (topTrust >= d.trustExempt && topTrust > 0)
 
+	sg := d.signals()
 	score := 0.0
 	signals := make([]string, 0, 10)
 	add := func(points float64, signal string) {
@@ -267,109 +264,88 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot) Resul
 
 	ppsRatio := safeRatio(pps, d.ppsFloor)
 	bpsRatio := safeRatio(bps, d.bpsFloor)
-	if pps >= d.ppsFloor {
-		add(10+math.Min(15, 5*math.Log2(math.Max(1, ppsRatio))), fmt.Sprintf("%s is %.1fx the configured PPS floor", formatPPS(pps), ppsRatio))
+	if pps >= d.ppsFloor && sg.PPSPoints > 0 {
+		add(sg.PPSPoints+math.Min(sg.PPSLogCap, sg.PPSLogScale*math.Log2(math.Max(1, ppsRatio))), fmt.Sprintf("%s is %.1fx the configured PPS floor", formatPPS(pps), ppsRatio))
 	}
-	if bps >= d.bpsFloor {
-		add(8+math.Min(12, 4*math.Log2(math.Max(1, bpsRatio))), fmt.Sprintf("%s is %.1fx the configured bandwidth floor", formatBPS(bps), bpsRatio))
+	if bps >= d.bpsFloor && sg.BPSPoints > 0 {
+		add(sg.BPSPoints+math.Min(sg.BPSLogCap, sg.BPSLogScale*math.Log2(math.Max(1, bpsRatio))), fmt.Sprintf("%s is %.1fx the configured bandwidth floor", formatBPS(bps), bpsRatio))
 	}
 	mature := base.samples >= 3
 	if mature {
 		z := math.Max(zPPS, zBPS*0.8)
-		switch {
-		case z >= 6:
-			add(22, fmt.Sprintf("rate is %.1f standard deviations above baseline", z))
-		case z >= 4:
-			add(18, fmt.Sprintf("rate is %.1f standard deviations above baseline", z))
-		case z >= 3:
-			add(14, fmt.Sprintf("rate is %.1f standard deviations above baseline", z))
-		case z >= 2:
-			add(8, fmt.Sprintf("rate is %.1f standard deviations above baseline", z))
-		case z >= 1.5:
-			add(4, fmt.Sprintf("rate is %.1f standard deviations above baseline", z))
+		if points, ok := tierPoints(sg.ZScoreTiers, z); ok {
+			add(points, fmt.Sprintf("rate is %.1f standard deviations above baseline", z))
 		}
 		if base.meanPPS > 0 && ppsRatio >= 1 {
-			ratioToBaseline := pps / base.meanPPS
-			switch {
-			case ratioToBaseline >= 20:
-				add(10, fmt.Sprintf("%.0fx its learned baseline", ratioToBaseline))
-			case ratioToBaseline >= 8:
-				add(6, fmt.Sprintf("%.0fx its learned baseline", ratioToBaseline))
+			if points, ok := tierPoints(sg.BaselineRatioTiers, pps/base.meanPPS); ok {
+				add(points, fmt.Sprintf("%.0fx its learned baseline", pps/base.meanPPS))
 			}
 		}
 	}
-	if recent.AvgPacketSize > 0 && (pps >= d.ppsFloor*0.5 || bps >= d.bpsFloor*0.5) {
-		switch {
-		case recent.AvgPacketSize <= 80:
-			add(10, fmt.Sprintf("tiny packets averaging %.0f bytes", recent.AvgPacketSize))
-		case recent.AvgPacketSize <= 120:
-			add(6, fmt.Sprintf("small packets averaging %.0f bytes", recent.AvgPacketSize))
-		case recent.AvgPacketSize <= 200:
-			add(3, fmt.Sprintf("smallish packets averaging %.0f bytes", recent.AvgPacketSize))
+	if recent.AvgPacketSize > 0 && (pps >= d.ppsFloor*sg.SignalVolumeGate || bps >= d.bpsFloor*sg.SignalVolumeGate) {
+		if points, ok := tierPointsInverted(sg.SmallPacketTiers, recent.AvgPacketSize); ok {
+			add(points, fmt.Sprintf("tiny or small packets averaging %.0f bytes", recent.AvgPacketSize))
 		}
 	}
 	if total > 0 {
-		if synShare >= 0.8 {
-			add(18, fmt.Sprintf("%.0f%% of packets are pure TCP SYN", synShare*100))
-		} else if synShare >= 0.6 {
-			add(12, fmt.Sprintf("%.0f%% of packets are pure TCP SYN", synShare*100))
-		} else if synShare >= 0.4 {
-			add(6, fmt.Sprintf("%.0f%% of packets are pure TCP SYN", synShare*100))
+		if points, ok := tierPoints(sg.SynShareTiers, synShare); ok {
+			add(points, fmt.Sprintf("%.0f%% of packets are pure TCP SYN", synShare*100))
 		}
-		if synCount > 100 && ackCount > 0 && synCount > ackCount*4 {
-			add(6, fmt.Sprintf("pure SYNs outnumber pure ACKs %.1fx", float64(synCount)/float64(ackCount)))
+		if synCount > sg.SynACKCountMin && ackCount > 0 && float64(synCount) > float64(ackCount)*sg.SynACKCountRatio {
+			add(sg.SynACKCountPoints, fmt.Sprintf("pure SYNs outnumber pure ACKs %.1fx", float64(synCount)/float64(ackCount)))
 		}
 		// A legitimate client that opens connections also answers: its ACK-flag
 		// samples (ACK and PSH-ACK) roughly match its SYN samples. A source
 		// whose SYNs outnumber its ACKs by an order of magnitude is sending
 		// handshakes that never complete.
-		if topSyn >= 100 && synOutnumbersACKs(topSyn, topACK, 10) && synShare >= 0.5 {
-			add(10, fmt.Sprintf("top source sent %s sampled SYNs against %s sampled ACKs (≥10:1)", formatCount(topSyn), formatCount(topACK)))
+		if topSyn >= sg.SrcSynMin && synOutnumbersACKs(topSyn, topACK, sg.SrcSynACKRatio) && synShare >= sg.SrcSynShareMin {
+			add(sg.SrcSynACKPoints, fmt.Sprintf("top source sent %s sampled SYNs against %s sampled ACKs (≥%.0f:1)", formatCount(topSyn), formatCount(topACK), sg.SrcSynACKRatio))
+		}
+		// PSH-ACK:pure-ACK asymmetry: a healthy conversation mixes data pushes
+		// and receiver acknowledgements. A source that blasts PSH-ACK with
+		// almost no pure ACK is a one-way flood, not a conversation.
+		if topPshAck >= sg.PshAckMin && topPshAck >= uint64(sg.PshAckRatio*math.Max(1, float64(topPureAck))) {
+			add(sg.PshAckPoints, fmt.Sprintf("top source sent %s PSH-ACK against %s pure ACK (≥%.0f:1)", formatCount(topPshAck), formatCount(topPureAck), sg.PshAckRatio))
 		}
 		if malformedShare := ratio(recent.Malformed, total); malformedShare > 0 {
 			// Gated like the small-packet signal: malformed shares only score
 			// when there is real volume behind them, so a handful of odd
 			// samples from a busy network cannot trip it.
-			if pps >= d.ppsFloor*0.5 || bps >= d.bpsFloor*0.5 {
-				switch {
-				case malformedShare >= 0.6:
-					add(12, fmt.Sprintf("%.0f%% of packets are malformed (invalid TCP flag combinations, zero ports, or stray fragments)", malformedShare*100))
-				case malformedShare >= 0.3:
-					add(7, fmt.Sprintf("%.0f%% of packets are malformed", malformedShare*100))
-				case malformedShare >= 0.15:
-					add(3, fmt.Sprintf("%.0f%% of packets are malformed", malformedShare*100))
+			if pps >= d.ppsFloor*sg.SignalVolumeGate || bps >= d.bpsFloor*sg.SignalVolumeGate {
+				if points, ok := tierPoints(sg.MalformedShareTiers, malformedShare); ok {
+					add(points, fmt.Sprintf("%.0f%% of packets are malformed (invalid TCP flag combinations, zero ports, or stray fragments)", malformedShare*100))
 				}
 			}
 		}
-		if udpShare >= 0.8 {
-			add(10, fmt.Sprintf("%.0f%% of packets are UDP", udpShare*100))
-		} else if udpShare >= 0.6 {
-			add(6, fmt.Sprintf("%.0f%% of packets are UDP", udpShare*100))
+		if points, ok := tierPoints(sg.UDPShareTiers, udpShare); ok {
+			add(points, fmt.Sprintf("%.0f%% of packets are UDP", udpShare*100))
 		}
-		if icmpShare >= 0.5 {
-			add(5, fmt.Sprintf("%.0f%% of packets are ICMP", icmpShare*100))
+		if icmpShare >= sg.ICMPShareMin {
+			add(sg.ICMPPoints, fmt.Sprintf("%.0f%% of packets are ICMP", icmpShare*100))
 		}
-		if recent.SourceCount >= 1000 {
-			add(8, fmt.Sprintf("%d distinct sources in the recent window (distributed)", recent.SourceCount))
+		// TTL entropy: real stacks emit a near-constant TTL per flow; a source
+		// or flood that randomises TTLs betrays itself in the distribution.
+		if sg.TTLDistinctMin > 0 && len(recent.TTLs) >= sg.TTLDistinctMin && (pps >= d.ppsFloor*sg.SignalVolumeGate || bps >= d.bpsFloor*sg.SignalVolumeGate) {
+			add(sg.TTLDistinctPoints, fmt.Sprintf("%d distinct TTL values in the recent window (randomised or forged TTLs)", len(recent.TTLs)))
+		}
+		if recent.SourceCount >= sg.DistributedSourcesMin {
+			add(sg.DistributedSourcesPoints, fmt.Sprintf("%d distinct sources in the recent window (distributed)", recent.SourceCount))
 		}
 		if recent.SourceOverflow > 0 {
-			add(4, fmt.Sprintf("source cardinality exceeded the tracking cap (%d packets untracked)", recent.SourceOverflow))
+			add(sg.SourceOverflowPoints, fmt.Sprintf("source cardinality exceeded the tracking cap (%d packets untracked)", recent.SourceOverflow))
 		}
-		if topShare >= 0.8 {
-			add(6, fmt.Sprintf("top source contributes %.0f%% of traffic", topShare*100))
-		} else if topShare >= 0.6 {
-			add(4, fmt.Sprintf("top source contributes %.0f%% of traffic", topShare*100))
+		if points, ok := tierPoints(sg.TopShareTiers, topShare); ok {
+			add(points, fmt.Sprintf("top source contributes %.0f%% of traffic", topShare*100))
 		}
 	}
-	switch {
-	case trustedTop:
-		add(-12, "")
-	case topTrust < 20 && top.Source != "":
-		add(8, fmt.Sprintf("top source trust is %.0f/100", topTrust))
-	case topTrust < 40 && top.Source != "":
-		add(4, fmt.Sprintf("top source trust is %.0f/100", topTrust))
-	case topTrust >= 80:
-		add(-8, "")
+	if trustedTop {
+		add(-sg.TrustedDiscount, "")
+	} else if top.Source != "" {
+		if points, ok := tierPointsInverted(sg.LowTrustTiers, topTrust); ok {
+			add(points, fmt.Sprintf("top source trust is %.0f/100", topTrust))
+		} else if topTrust >= sg.HighTrustMin {
+			add(-sg.HighTrustDiscount, "")
+		}
 	}
 	if score < 0 {
 		score = 0
@@ -378,14 +354,14 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot) Resul
 		score = 100
 	}
 	warmup := base.samples < d.warmupWindows()
-	if warmup && score > 45 {
-		score = 45
+	if warmup && score > sg.WarmupScoreCap {
+		score = sg.WarmupScoreCap
 	}
-	base.smoothed = base.smoothed*0.6 + score*0.4
+	base.smoothed = base.smoothed*sg.SmoothingHistory + score*(1-sg.SmoothingHistory)
 	if base.samples == 0 {
 		base.smoothed = score
 	}
-	gate := pps >= d.ppsFloor*0.25 || bps >= d.bpsFloor*0.25
+	gate := pps >= d.ppsFloor*sg.ArmGateFactor || bps >= d.bpsFloor*sg.ArmGateFactor
 	if !warmup && gate && base.smoothed >= d.threshold {
 		base.consecutive++
 	} else {
@@ -396,9 +372,9 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot) Resul
 		base.calm = 0
 	}
 	if base.attack {
-		if base.smoothed < d.threshold*0.5 {
+		if base.smoothed < d.threshold*sg.CalmFactor {
 			base.calm++
-			if base.calm >= 5 {
+			if base.calm >= sg.CalmWindows {
 				base.attack = false
 				base.consecutive = 0
 			}
@@ -444,9 +420,9 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot) Resul
 		finding, action := d.volumetricFinding(now, dst, snap, state, top, topShare, topTrust, trustedTop, topSourceInternal, protocolShares, synShare, dominantPort, dominantPortShare)
 		result.Findings = append(result.Findings, finding)
 		haveFinding = action != nil
-	} else if warmup && gate && (pps >= d.ppsFloor*2 || bps >= d.bpsFloor*2) && (synShare >= 0.6 || pps >= d.ppsFloor*4) {
+	} else if warmup && gate && (pps >= d.ppsFloor*sg.WarmupVolumeMultiple || bps >= d.bpsFloor*sg.WarmupVolumeMultiple) && (synShare >= sg.WarmupSynShare || pps >= d.ppsFloor*sg.WarmupExtremeMultiple) {
 		reason := fmt.Sprintf("Baseline is still learning (%d/%d samples): traffic to %s is %s / %s. This is an observation, not a confirmed attack, and no statistical mitigation is applied during warm-up.", base.samples, d.warmupWindows(), dst, formatPPS(pps), formatBPS(bps))
-		if synShare >= 0.6 {
+		if synShare >= sg.WarmupSynShare {
 			reason += fmt.Sprintf(" %.0f%% of packets are pure TCP SYN.", synShare*100)
 		}
 		result.Findings = append(result.Findings, Finding{Alert: alerts.Candidate{
@@ -466,8 +442,8 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot) Resul
 	// layer has enough persistence, when the source's own history is damning.
 	// The SYN:ACK asymmetry is the core stateless evidence: a source that
 	// opened hundreds of handshakes but never answered a single one.
-	if !haveFinding && base.samples >= 2 && !warmup && gate && top.SourceAddr.IsValid() && topShare >= 0.5 && topSyn >= 100 && synOutnumbersACKs(topSyn, topACK, 10) && synShare >= 0.6 && pps >= math.Max(200, d.ppsFloor*0.25) && !trustedTop && !topSourceInternal {
-		reason := fmt.Sprintf("Probable SYN flood toward %s: top source %s sent %s sampled SYNs but only %s sampled ACKs (≥10:1); the destination saw %s (%s) with %.0f%% pure SYN.", dst, top.Source, formatCount(topSyn), formatCount(topACK), formatPPS(pps), formatBPS(bps), synShare*100)
+	if !haveFinding && base.samples >= 2 && !warmup && gate && top.SourceAddr.IsValid() && topShare >= sg.RepSynTopShare && topSyn >= sg.RepSynMin && synOutnumbersACKs(topSyn, topACK, sg.RepSynACKRatio) && synShare >= sg.RepSynShareMin && pps >= math.Max(sg.RepSynMinPPS, d.ppsFloor*sg.ArmGateFactor) && !trustedTop && !topSourceInternal {
+		reason := fmt.Sprintf("Probable SYN flood toward %s: top source %s sent %s sampled SYNs but only %s sampled ACKs (≥%.0f:1); the destination saw %s (%s) with %.0f%% pure SYN.", dst, top.Source, formatCount(topSyn), formatCount(topACK), sg.RepSynACKRatio, formatPPS(pps), formatBPS(bps), synShare*100)
 		action := &mitigate.Request{
 			Kind:        mitigate.KindFlowspec,
 			Source:      top.SourceAddr,
@@ -479,7 +455,7 @@ func (d *Detector) evaluateOne(now time.Time, snap aggregate.DestSnapshot) Resul
 			Reason:      "reputation: probable SYN flood from " + top.Source,
 			Owner:       "reputation",
 		}
-		if pps >= d.ppsFloor*2 {
+		if pps >= d.ppsFloor*sg.RepDiscardMultiple {
 			action.Action = "discard"
 		}
 		result.Findings = append(result.Findings, Finding{
@@ -514,11 +490,11 @@ func (d *Detector) evaluateIdle(now time.Time, dst netip.Addr) Result {
 	base.lastScore = 0
 	base.signals = nil
 	base.consecutive = 0
-	base.smoothed *= 0.6
+	base.smoothed *= d.signals().SmoothingHistory
 	if base.attack {
-		if base.smoothed < d.threshold*0.5 {
+		if base.smoothed < d.threshold*d.signals().CalmFactor {
 			base.calm++
-			if base.calm >= 5 {
+			if base.calm >= d.signals().CalmWindows {
 				base.attack = false
 				base.calm = 0
 			}
@@ -530,6 +506,7 @@ func (d *Detector) evaluateIdle(now time.Time, dst netip.Addr) Result {
 }
 
 func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggregate.DestSnapshot, state State, top aggregate.SourceCount, topShare, topTrust float64, trusted, internal bool, protocols map[string]float64, synShare float64, dominantPort uint16, dominantPortShare float64) (Finding, *mitigate.Request) {
+	sg := d.signals()
 	severity := alerts.SeverityCritical
 	qualified := true
 	if internal {
@@ -537,7 +514,7 @@ func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggrega
 		qualified = false
 	}
 	if trusted && !internal {
-		strong := state.PPS >= d.ppsFloor*20 || (synShare >= 0.85 && state.PPS >= d.ppsFloor*5) || state.SmoothedScore >= d.threshold+25
+		strong := state.PPS >= d.ppsFloor*sg.TrustedStrongPPSMultiple || (synShare >= sg.TrustedStrongSynShare && state.PPS >= d.ppsFloor*sg.TrustedStrongSynPPSMultiple) || state.SmoothedScore >= d.threshold+sg.TrustedStrongScoreBonus
 		if !strong {
 			severity = alerts.SeverityWarning
 			qualified = false
@@ -560,7 +537,7 @@ func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggrega
 	}
 	reason += "."
 	if synShare < 0.3 {
-		if topSyn, topACK, _, _ := d.sourceStats(dst, top.SourceAddr); topSyn >= 100 && synOutnumbersACKs(topSyn, topACK, 10) {
+		if topSyn, topACK, _, _, _, _ := d.sourceStats(dst, top.SourceAddr); topSyn >= sg.SrcSynMin && synOutnumbersACKs(topSyn, topACK, sg.SrcSynACKRatio) {
 			reason += fmt.Sprintf(" The top source sent %s sampled SYNs against %s sampled ACKs.", formatCount(topSyn), formatCount(topACK))
 		}
 	}
@@ -593,17 +570,17 @@ func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggrega
 	if protocol == 0 {
 		return finding, nil
 	}
-	precise := top.SourceAddr.IsValid() && topShare >= 0.6 && !d.protected.Contains(top.SourceAddr)
-	topSyn, topACK, _, _ := d.sourceStats(dst, top.SourceAddr)
+	precise := top.SourceAddr.IsValid() && topShare >= sg.PreciseSourceShare && !d.protected.Contains(top.SourceAddr)
+	topSyn, topACK, _, _, _, _ := d.sourceStats(dst, top.SourceAddr)
 	// RTBH is deliberately rare. It is only for a confirmed, extreme SYN flood
 	// from one external source whose traffic is almost pure SYN with a stark
 	// SYN:ACK imbalance. Everything else gets a precise Flowspec rule. This
 	// keeps a blunt blackhole out of ambiguous or distributed incidents.
-	severeRTBH := precise && !trusted && protocol == 6 && synShare >= 0.5 &&
-		topShare >= 0.9 && topTrust < 20 && topSyn >= 1_000 && synOutnumbersACKs(topSyn, topACK, 20) &&
-		state.SmoothedScore >= d.threshold+20 &&
-		(state.PPS >= math.Max(d.ppsFloor*200, 1_000_000) ||
-			state.BPS >= math.Max(d.bpsFloor*50, 1_000_000_000))
+	severeRTBH := precise && !trusted && protocol == 6 && synShare >= sg.RTBHSynShare &&
+		topShare >= sg.RTBHTopShare && topTrust < sg.LowTrustTierFloor() && topSyn >= sg.RTBHSynMin && synOutnumbersACKs(topSyn, topACK, sg.RTBHSynACKRatio) &&
+		state.SmoothedScore >= d.threshold+sg.RTBHScoreBonus &&
+		(state.PPS >= math.Max(d.ppsFloor*sg.RTBHPPSMultiple, sg.RTBHMinPPS) ||
+			state.BPS >= math.Max(d.bpsFloor*sg.RTBHBPSMultiple, sg.RTBHMinBPS))
 	if severeRTBH {
 		finding.Alert.Reason += " A single external source dominates this extreme SYN flood; a host-route RTBH is proposed."
 		finding.Action = &mitigate.Request{
@@ -624,14 +601,14 @@ func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggrega
 		Action:      "rate-limit",
 	}
 	if protocol == 6 || protocol == 17 {
-		if dominantPort != 0 && dominantPortShare >= 0.8 {
+		if dominantPort != 0 && dominantPortShare >= sg.DominantPortShare {
 			request.DstPort = dominantPort
 		}
 	}
 	if protocol == 6 && synShare >= 0.5 {
 		request.TCPFlags = 0x02
 	}
-	strong := state.SmoothedScore >= d.threshold+15 && (synShare >= 0.5 || topTrust < 40)
+	strong := state.SmoothedScore >= d.threshold+sg.StrongScoreBonus && (synShare >= sg.StrongSynShare || topTrust < sg.StrongTrustBelow)
 	if precise {
 		request.Source = top.SourceAddr
 		if strong && !trusted {
@@ -651,14 +628,15 @@ func (d *Detector) volumetricFinding(now time.Time, dst netip.Addr, snap aggrega
 	return finding, request
 }
 
-func (d *Detector) sourceStats(dst, src netip.Addr) (uint64, uint64, float64, bool) {
+func (d *Detector) sourceStats(dst, src netip.Addr) (uint64, uint64, uint64, uint64, float64, bool) {
 	if d.intel == nil || !src.IsValid() {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 	return d.intel.SourceSummary(dst, src)
 }
 
 func (d *Detector) updateBaseline(base *baseline, pps, bps float64, warmup bool) {
+	sg := d.signals()
 	if base.attack || warmup && base.samples == 0 {
 		if base.samples == 0 {
 			base.meanPPS = pps
@@ -667,11 +645,14 @@ func (d *Detector) updateBaseline(base *baseline, pps, bps float64, warmup bool)
 		}
 		return
 	}
-	obvious := pps > math.Max(d.ppsFloor*4, base.meanPPS*8) || bps > math.Max(d.bpsFloor*4, base.meanBPS*8)
+	obvious := pps > math.Max(d.ppsFloor*sg.BaselineSkipFloorMultiple, base.meanPPS*sg.BaselineSkipBaselineMultiple) || bps > math.Max(d.bpsFloor*sg.BaselineSkipFloorMultiple, base.meanBPS*sg.BaselineSkipBaselineMultiple)
 	if base.attack || obvious {
 		return
 	}
-	const alpha = 0.04
+	alpha := sg.BaselineAlpha
+	if alpha <= 0 || alpha > 1 {
+		alpha = 0.04
+	}
 	if base.samples == 0 {
 		base.meanPPS = pps
 		base.meanBPS = bps
@@ -685,6 +666,29 @@ func (d *Detector) updateBaseline(base *baseline, pps, bps float64, warmup bool)
 	base.meanBPS += alpha * deltaBPS
 	base.varBPS = (1 - alpha) * (base.varBPS + alpha*deltaBPS*deltaBPS)
 	base.samples++
+}
+
+// tierPoints returns the points of the first tier whose threshold the value
+// meets or exceeds. Tiers are ordered from most to least extreme.
+func tierPoints(tiers []config.SignalTier, value float64) (float64, bool) {
+	for _, tier := range tiers {
+		if value >= tier.Min {
+			return tier.Points, true
+		}
+	}
+	return 0, false
+}
+
+// tierPointsInverted returns the points of the first tier whose threshold the
+// value falls below (small-packet sizes, low trust). Tiers are ordered from
+// most to least extreme.
+func tierPointsInverted(tiers []config.SignalTier, value float64) (float64, bool) {
+	for _, tier := range tiers {
+		if value <= tier.Min {
+			return tier.Points, true
+		}
+	}
+	return 0, false
 }
 
 // State returns the last detection state for a destination.

@@ -69,6 +69,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/rules/{id}", s.handleDeleteRule)
 	s.mux.HandleFunc("GET /api/settings", s.handleSettings)
 	s.mux.HandleFunc("POST /api/settings/test-webhook", s.handleTestWebhook)
+	s.mux.HandleFunc("GET /api/detection", s.handleGetDetection)
+	s.mux.HandleFunc("PUT /api/detection", s.handleUpdateDetection)
 	s.mux.HandleFunc("GET /api/events", s.handleEvents)
 	s.mux.HandleFunc("GET /assets/app.css", s.handleCSS)
 	s.mux.HandleFunc("GET /assets/app.js", s.handleJS)

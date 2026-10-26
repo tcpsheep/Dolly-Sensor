@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"dollysensor/internal/blocklist"
+	"dollysensor/internal/config"
 	"dollysensor/internal/rules"
 	"dollysensor/internal/sensor"
 )
@@ -428,6 +429,24 @@ func (s *Server) handleImportPack(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.sensor.Settings())
+}
+
+func (s *Server) handleGetDetection(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.sensor.DetectionTuning())
+}
+
+func (s *Server) handleUpdateDetection(w http.ResponseWriter, r *http.Request) {
+	var input config.DetectionConfig
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	applied, err := s.sensor.UpdateDetection(input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "detection": applied})
 }
 
 func (s *Server) handleTestWebhook(w http.ResponseWriter, r *http.Request) {

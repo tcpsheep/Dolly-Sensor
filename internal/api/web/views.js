@@ -2316,5 +2316,407 @@
 
   D.registerLoader("settings", loadSettings);
 
+  /* ------------------------------------------------------------------ */
+  /* Detection tuning                                                    */
+
+  const DET_FIELD_META = {
+    threshold: ["Threat threshold", "Smoothed score at which a destination counts as anomalous (1–100).", 1],
+    persistence: ["Persistence", "Consecutive windows above the threshold before an attack is confirmed.", 1],
+    pps_floor: ["PPS floor", "Packets per second at which volumetric scoring starts.", 1],
+    bps_floor: ["BPS floor", "Bits per second at which volumetric scoring starts.", 1],
+    warmup_windows: ["Warm-up windows", "Samples collected before statistical scoring is trusted.", 1],
+    trust_exemption_score: ["Trust exemption score", "Reputation at or above which a source is exempt from scoring.", 1],
+    rate_window_seconds: ["Rate window (s)", "Seconds of per-destination rate buckets behind each evaluation.", 1],
+    evaluation_interval: ["Evaluation interval", "Cadence of detection rounds. Restart-only; shown for reference.", null],
+    cooldown: ["Alert cooldown", "How long repeated identical alerts coalesce (e.g. 10m0s).", null],
+  };
+
+  const SIGNAL_GROUPS = [
+    {
+      title: "Volumetric floors",
+      subtitle: "Points added when rates cross the configured floors",
+      fields: [
+        ["pps_points", "PPS floor points", "Base points once PPS reaches the floor.", 1],
+        ["pps_log_cap", "PPS log cap", "Maximum extra points from the logarithmic ramp.", 1],
+        ["pps_log_scale", "PPS log scale", "Points added per doubling above the floor.", 1],
+        ["bps_points", "BPS floor points", "Base points once BPS reaches the floor.", 1],
+        ["bps_log_cap", "BPS log cap", "Maximum extra points from the logarithmic ramp.", 1],
+        ["bps_log_scale", "BPS log scale", "Points added per doubling above the floor.", 1],
+      ],
+    },
+    {
+      title: "Statistical baseline",
+      subtitle: "Z-score and learned-baseline evidence",
+      fields: [
+        ["baseline_alpha", "Baseline learning rate", "EWMA alpha; lower learns slower and forgets less.", 0.01],
+        ["baseline_skip_floor_multiple", "Baseline skip: floor multiple", "Rates beyond this multiple of the floor are not taught into the baseline.", 1],
+        ["baseline_skip_baseline_multiple", "Baseline skip: baseline multiple", "Rates beyond this multiple of the learned mean are not taught.", 1],
+      ],
+      tiers: [
+        ["z_score_tiers", "Z-score tiers", "Points per standard deviations above baseline; most extreme first."],
+        ["baseline_ratio_tiers", "Baseline ratio tiers", "Points per multiple of the learned baseline; most extreme first."],
+      ],
+    },
+    {
+      title: "Packet shape",
+      subtitle: "Size and malformed-packet evidence",
+      fields: [
+        ["signal_volume_gate", "Signal volume gate", "Fraction of the floors at which size/malformed/TTL signals start scoring (0–1).", 0.05],
+      ],
+      tiers: [
+        ["small_packet_tiers", "Small-packet tiers", "Points for average sizes at or below each threshold; smallest first."],
+        ["malformed_share_tiers", "Malformed share tiers", "Points per malformed share of traffic; most extreme first."],
+      ],
+    },
+    {
+      title: "TCP flag evidence",
+      subtitle: "Pure SYN share and per-source SYN:ACK asymmetry",
+      fields: [
+        ["syn_ack_count_min", "SYN:ACK count minimum", "Pure SYN count required before the count-imbalance signal applies.", 1],
+        ["syn_ack_count_ratio", "SYN:ACK count ratio", "Pure SYNs must outnumber pure ACKs by this factor.", 1],
+        ["syn_ack_count_points", "SYN:ACK count points", "Points for the destination-level SYN/ACK count imbalance.", 1],
+        ["src_syn_min", "Per-source SYN minimum", "Sampled SYNs required from the top source before asymmetry counts.", 1],
+        ["src_syn_ack_ratio", "Per-source SYN:ACK ratio", "SYNs must outnumber ACKs by this factor for the per-source signal.", 1],
+        ["src_syn_share_min", "Per-source SYN share minimum", "Pure-SYN share required alongside the per-source asymmetry (0–1).", 0.05],
+        ["src_syn_ack_points", "Per-source asymmetry points", "Points for per-source SYN:ACK asymmetry.", 1],
+      ],
+      tiers: [
+        ["syn_share_tiers", "Pure-SYN share tiers", "Points per pure-SYN share of traffic; most extreme first."],
+      ],
+    },
+    {
+      title: "PSH-ACK : pure-ACK asymmetry",
+      subtitle: "One-way data blasts: a source that only pushes and never acknowledges",
+      fields: [
+        ["psh_ack_min", "PSH-ACK minimum samples", "Sampled PSH-ACK packets required from the top source.", 1],
+        ["psh_ack_ratio", "PSH-ACK : pure-ACK ratio", "PSH-ACKs must outnumber pure ACKs by this factor (a healthy conversation mixes both).", 1],
+        ["psh_ack_points", "PSH-ACK asymmetry points", "Points added when the asymmetry fires.", 1],
+      ],
+    },
+    {
+      title: "Protocol mix and TTL entropy",
+      subtitle: "UDP/ICMP dominance and randomised TTLs",
+      fields: [
+        ["icmp_share_min", "ICMP share minimum", "ICMP share at which the ICMP signal fires (0–1).", 0.05],
+        ["icmp_points", "ICMP points", "Points for ICMP-dominant traffic.", 1],
+        ["ttl_distinct_min", "Distinct TTL minimum", "Distinct TTL values in the window that indicate forged packets.", 1],
+        ["ttl_distinct_points", "Distinct TTL points", "Points for TTL entropy toward one destination.", 1],
+      ],
+      tiers: [
+        ["udp_share_tiers", "UDP share tiers", "Points per UDP share of traffic; most extreme first."],
+      ],
+    },
+    {
+      title: "Source distribution",
+      subtitle: "Distributed vs concentrated attacks",
+      fields: [
+        ["distributed_sources_min", "Distributed sources minimum", "Distinct sources before traffic counts as distributed.", 1],
+        ["distributed_sources_points", "Distributed sources points", "Points for a distributed source count.", 1],
+        ["source_overflow_points", "Source overflow points", "Points when source cardinality exceeds the tracking cap.", 1],
+      ],
+      tiers: [
+        ["top_share_tiers", "Top-source share tiers", "Points per top-source share of traffic; most extreme first."],
+      ],
+    },
+    {
+      title: "Trust adjustments",
+      subtitle: "Reputation discounts and penalties",
+      fields: [
+        ["high_trust_min", "High trust minimum", "Reputation at or above which the detector subtracts points.", 1],
+        ["high_trust_discount", "High trust discount", "Points subtracted for a highly trusted top source.", 1],
+        ["trusted_discount", "Trusted/exempt discount", "Points subtracted when the top source is trusted or exempt.", 1],
+      ],
+      tiers: [
+        ["low_trust_tiers", "Low trust tiers", "Points per reputation below each threshold; lowest first."],
+      ],
+    },
+    {
+      title: "Attack state machine",
+      subtitle: "Smoothing, arming, and calm-down",
+      fields: [
+        ["warmup_score_cap", "Warm-up score cap", "Maximum score while the baseline is still learning.", 1],
+        ["smoothing_history", "Smoothing history weight", "EWMA weight of the previous smoothed score (0–1).", 0.05],
+        ["arm_gate_factor", "Arm gate factor", "Fraction of the floors at which scoring can arm an attack (0–1).", 0.05],
+        ["calm_factor", "Calm factor", "Attack clears when the score falls below this fraction of the threshold (0–1).", 0.05],
+        ["calm_windows", "Calm windows", "Consecutive calm evaluations before an attack clears.", 1],
+      ],
+    },
+    {
+      title: "Warm-up observation",
+      subtitle: "Alert-only notice while learning; no mitigation",
+      fields: [
+        ["warmup_volume_multiple", "Warm-up volume multiple", "Multiple of the floors that triggers a warm-up observation.", 1],
+        ["warmup_extreme_multiple", "Warm-up extreme multiple", "PPS multiple that alone justifies a warm-up observation.", 1],
+        ["warmup_syn_share", "Warm-up SYN share", "Pure-SYN share that alone justifies a warm-up observation (0–1).", 0.05],
+      ],
+    },
+    {
+      title: "Reputation layer (SYN flood)",
+      subtitle: "Fires before statistical persistence when the source history is damning",
+      fields: [
+        ["rep_syn_top_share", "Top-source share minimum", "Share of traffic the top source needs (0–1).", 0.05],
+        ["rep_syn_min", "SYN minimum samples", "Sampled SYNs from the top source.", 1],
+        ["rep_syn_ack_ratio", "SYN:ACK ratio", "SYNs must outnumber ACKs by this factor.", 1],
+        ["rep_syn_share_min", "SYN share minimum", "Pure-SYN share of destination traffic (0–1).", 0.05],
+        ["rep_syn_min_pps", "Minimum PPS", "Absolute floor below which the reputation layer stays quiet.", 1],
+        ["rep_discard_multiple", "Discard multiple", "PPS multiple of the floor that upgrades the action to discard.", 1],
+      ],
+    },
+    {
+      title: "Volumetric finding shaping",
+      subtitle: "How the Flowspec rule proposed by a confirmed attack is scoped",
+      fields: [
+        ["precise_source_share", "Precise source share", "Top-source share that allows a source-scoped rule (0–1).", 0.05],
+        ["strong_score_bonus", "Strong score bonus", "Score above the threshold that qualifies as strong evidence.", 1],
+        ["strong_syn_share", "Strong SYN share", "SYN share that qualifies as strong evidence (0–1).", 0.05],
+        ["strong_trust_below", "Strong trust below", "Reputation below which evidence qualifies as strong.", 1],
+        ["dominant_port_share", "Dominant port share", "Port concentration that allows a port-scoped rule (0–1).", 0.05],
+        ["trusted_strong_syn_share", "Trusted: strong SYN share", "SYN share that overrides trust for a trusted top source (0–1).", 0.05],
+        ["trusted_strong_pps_multiple", "Trusted: extreme PPS multiple", "PPS multiple of the floor that overrides trust on volume alone.", 1],
+        ["trusted_strong_syn_pps_multiple", "Trusted: SYN PPS multiple", "PPS multiple that overrides trust alongside strong SYN share.", 1],
+        ["trusted_strong_score_bonus", "Trusted: strong score bonus", "Score above the threshold that overrides trust.", 1],
+      ],
+    },
+    {
+      title: "RTBH gating",
+      subtitle: "Black holes are deliberately rare: extreme single-source SYN floods only",
+      fields: [
+        ["rtbh_syn_share", "SYN share minimum", "Pure-SYN share required (0–1).", 0.05],
+        ["rtbh_top_share", "Top-source share minimum", "Single-source dominance required (0–1).", 0.05],
+        ["rtbh_syn_min", "SYN minimum samples", "Sampled SYNs from the dominant source.", 1],
+        ["rtbh_syn_ack_ratio", "SYN:ACK ratio", "SYNs must outnumber ACKs by this factor.", 1],
+        ["rtbh_score_bonus", "Score bonus", "Score above the threshold required.", 1],
+        ["rtbh_pps_multiple", "PPS multiple", "PPS multiple of the floor.", 1],
+        ["rtbh_min_pps", "Absolute minimum PPS", "Hard PPS floor for a black hole.", 1],
+        ["rtbh_bps_multiple", "BPS multiple", "BPS multiple of the floor.", 1],
+        ["rtbh_min_bps", "Absolute minimum BPS", "Hard BPS floor for a black hole.", 1],
+      ],
+    },
+  ];
+
+  function detNumberInput(value, step) {
+    return el("input", {
+      class: "input",
+      type: "number",
+      step: step ? String(step) : "any",
+      value: value === undefined || value === null ? "" : String(value),
+      autocomplete: "off",
+    });
+  }
+
+  function detTierRow(tier) {
+    return el("div", { class: "form-row", dataset: { tierRow: "1" } },
+      detNumberInput(tier ? tier.min : "", 0.01),
+      detNumberInput(tier ? tier.points : "", 1),
+      el("button", {
+        class: "button button-ghost button-small",
+        type: "button",
+        text: "Remove",
+        onClick: (event) => { event.target.closest("[data-tier-row]").remove(); },
+      }),
+    );
+  }
+
+  function detTierEditor(label, hint, tiers) {
+    const rows = el("div", { class: "tier-rows" }, (tiers || []).map((tier) => detTierRow(tier)));
+    return el("div", { class: "form-field span-2", dataset: { tierKey: "1" } },
+      el("label", { text: label }),
+      el("div", { class: "form-hint", text: "Two inputs per row: threshold, then points." }),
+      rows,
+      el("button", {
+        class: "button button-ghost button-small",
+        type: "button",
+        text: "Add tier",
+        onClick: () => rows.appendChild(detTierRow(null)),
+      }),
+      hint ? el("div", { class: "form-hint", text: hint }) : null,
+    );
+  }
+
+  async function loadDetection(token) {
+    const data = await apiGet("/api/detection");
+    if (token !== D.state.token) return;
+    D.applyHeader(null);
+    const detection = data.detection || {};
+    const signals = detection.signals || {};
+    const sweep = detection.sweep || {};
+    const flatInputs = new Map();
+    const tierEditors = new Map();
+    let sweepEnabledInput = null;
+    let sweepActionInput = null;
+
+    const coreBody = el("div", { class: "form-grid" });
+    for (const key of ["threshold", "persistence", "pps_floor", "bps_floor", "warmup_windows", "trust_exemption_score", "rate_window_seconds"]) {
+      const meta = DET_FIELD_META[key] || [key, "", 1];
+      const input = detNumberInput(detection[key], meta[2]);
+      input.dataset.path = key;
+      flatInputs.set(key, input);
+      coreBody.appendChild(el("div", { class: "form-field" }, el("label", { text: meta[0] }), input, meta[1] ? el("div", { class: "form-hint", text: meta[1] }) : null));
+    }
+    const intervalMeta = DET_FIELD_META.evaluation_interval;
+    const cooldownMeta = DET_FIELD_META.cooldown;
+    const intervalInput = el("input", { class: "input", type: "text", value: detection.evaluation_interval || "", disabled: true });
+    const cooldownInput = el("input", { class: "input", type: "text", value: detection.cooldown || "", autocomplete: "off" });
+    cooldownInput.dataset.path = "cooldown";
+    flatInputs.set("cooldown", cooldownInput);
+    coreBody.appendChild(el("div", { class: "form-field" }, el("label", { text: intervalMeta[0] }), intervalInput, el("div", { class: "form-hint", text: intervalMeta[1] })));
+    coreBody.appendChild(el("div", { class: "form-field" }, el("label", { text: cooldownMeta[0] }), cooldownInput, el("div", { class: "form-hint", text: cooldownMeta[1] })));
+
+    const signalCards = [card("Core thresholds", "Scoring, state machine, and cadence", coreBody)];
+    for (const group of SIGNAL_GROUPS) {
+      const grid = el("div", { class: "form-grid" });
+      for (const [key, label, hint, step] of group.fields || []) {
+        const input = detNumberInput(signals[key], step);
+        input.dataset.path = "signals." + key;
+        flatInputs.set("signals." + key, input);
+        grid.appendChild(el("div", { class: "form-field" }, el("label", { text: label }), input, hint ? el("div", { class: "form-hint", text: hint }) : null));
+      }
+      for (const [key, label, hint] of group.tiers || []) {
+        const editor = detTierEditor(label, hint, signals[key]);
+        editor.dataset.key = key;
+        tierEditors.set(key, editor);
+        grid.appendChild(editor);
+      }
+      signalCards.push(card(group.title, group.subtitle, grid));
+    }
+
+    sweepEnabledInput = el("input", { type: "checkbox", checked: !!sweep.enabled });
+    sweepActionInput = el("select", { class: "input" },
+      el("option", { value: "none", text: "none — alert only" }),
+      el("option", { value: "rate-limit", text: "rate-limit" }),
+      el("option", { value: "discard", text: "discard" }),
+    );
+    sweepActionInput.value = sweep.action || "rate-limit";
+    const sweepNumbers = new Map();
+    for (const key of ["min_destinations", "prefix_bits", "min_packets", "ttl_min_packets"]) {
+      const input = detNumberInput(sweep[key], 1);
+      input.dataset.path = "sweep." + key;
+      sweepNumbers.set(key, input);
+    }
+    const sweepGrid = el("div", { class: "form-grid" },
+      el("div", { class: "form-field" },
+        el("label", { text: "Carpet-bomb detection" }),
+        el("label", { class: "check-row" }, sweepEnabledInput, el("span", { text: " enabled" })),
+        el("div", { class: "form-hint", text: "Tracks one external source touching many protected IPs across a ~30s window; independent of volumetric scoring." }),
+      ),
+      el("div", { class: "form-field" }, el("label", { text: "Sweep action" }), sweepActionInput,
+        el("div", { class: "form-hint", text: "Mitigation proposed for a confirmed sweep: source-scoped, aimed at the sprayed prefix." })),
+      el("div", { class: "form-field" }, el("label", { text: "Minimum destinations" }), sweepNumbers.get("min_destinations"),
+        el("div", { class: "form-hint", text: "Distinct protected IPs one source must touch before it counts as a carpet bomb." })),
+      el("div", { class: "form-field" }, el("label", { text: "Target prefix bits" }), sweepNumbers.get("prefix_bits"),
+        el("div", { class: "form-hint", text: "Prefix length used to report and scope the sprayed subnet (24 = one IPv4 /24)." })),
+      el("div", { class: "form-field" }, el("label", { text: "Minimum packets" }), sweepNumbers.get("min_packets"),
+        el("div", { class: "form-hint", text: "Volume required before the sweep layer proposes mitigation." })),
+      el("div", { class: "form-field" }, el("label", { text: "TTL anomaly minimum packets" }), sweepNumbers.get("ttl_min_packets"),
+        el("div", { class: "form-hint", text: "Volume required before per-source TTL entropy raises an alert." })),
+    );
+
+    const sweepRows = (data.sweeps || []).map((row) => ({
+      cells: [
+        el("span", { class: "cell-mono", text: row.source || "?" }),
+        fmtInt(row.distinct_destinations),
+        row.target_prefix || "—",
+        fmtInt(row.packets),
+        fmtInt(row.distinct_ttls),
+        fmtInt(row.low_ttls),
+        (row.top_destinations || []).slice(0, 3).join(", ") || "—",
+      ],
+    }));
+    const sweepsTable = table(
+      ["Source", "Destinations", "Target prefix", "Packets", "Distinct TTLs", "TTL ≤ 1", "Top destinations"],
+      sweepRows,
+      { compact: true, empty: "No source is currently touching multiple protected destinations." },
+    );
+
+    const saveButton = button("Apply tuning", {
+      variant: "primary",
+      onClick: async () => {
+        const payload = JSON.parse(JSON.stringify(detection));
+        payload.signals = payload.signals || {};
+        payload.sweep = payload.sweep || {};
+        let invalid = null;
+        for (const [path, input] of flatInputs) {
+          const value = String(input.value || "").trim();
+          if (path === "cooldown") {
+            payload.cooldown = value;
+            continue;
+          }
+          const parsed = Number(value);
+          if (value !== "" && !Number.isFinite(parsed)) {
+            invalid = path;
+            break;
+          }
+          setPath(payload, path, value === "" ? 0 : parsed);
+        }
+        for (const [key, editor] of tierEditors) {
+          const tiers = [];
+          for (const row of editor.querySelectorAll("[data-tier-row]")) {
+            const inputs = row.querySelectorAll("input");
+            const min = Number(inputs[0].value);
+            const points = Number(inputs[1].value);
+            if (!Number.isFinite(min) || !Number.isFinite(points)) {
+              invalid = key;
+              break;
+            }
+            tiers.push({ min: min, points: points });
+          }
+          payload.signals[key] = tiers;
+          if (invalid) break;
+        }
+        for (const [key, input] of sweepNumbers) {
+          const parsed = Number(input.value);
+          if (!Number.isFinite(parsed)) {
+            invalid = "sweep." + key;
+            break;
+          }
+          payload.sweep[key] = parsed;
+        }
+        if (invalid) {
+          toast("Tuning not applied", "Field " + invalid + " is not a valid number.", "error");
+          return;
+        }
+        payload.sweep.enabled = !!sweepEnabledInput.checked;
+        payload.sweep.action = sweepActionInput.value;
+        saveButton.disabled = true;
+        saveButton.textContent = "Applying…";
+        try {
+          await mutate("/api/detection", "PUT", payload);
+          toast("Detection tuning applied", "New thresholds, weights, and gates are live. Learned baselines were preserved.", "good");
+          D.refreshCurrent();
+        } catch (error) {
+          toast("Tuning rejected", error.message, "error");
+        } finally {
+          saveButton.disabled = false;
+          saveButton.textContent = "Apply tuning";
+        }
+      },
+    });
+
+    const view = el("div", {},
+      el("div", { class: "view-lede", text: "Every rate, asymmetry, share, and score weight the detector uses. Changes apply immediately and live for this process; mirror durable values in config.json so they survive a restart." }),
+      el("div", { class: "view-actions" }, saveButton, refreshButton()),
+      el("div", { class: "grid-2" },
+        ...signalCards,
+        card("Sweep and TTL entropy", "Carpet-bomb and forged-packet detection", sweepGrid),
+        card("Current sweeps", "Cross-destination behaviour in the last ~30 seconds", tableWrap(sweepsTable.table, "table-scroll-short")),
+      ),
+    );
+    if (!mount(token, view)) return;
+    // No auto-refresh: it would discard in-progress edits. The sweeps table
+    // updates when the operator refreshes or re-enters the view.
+    D.state.viewHooks = { autoRefresh: 0 };
+  }
+
+  function setPath(target, path, value) {
+    const parts = path.split(".");
+    let node = target;
+    for (let i = 0; i < parts.length - 1; i++) {
+      node = node[parts[i]] = node[parts[i]] || {};
+    }
+    node[parts[parts.length - 1]] = value;
+  }
+
+  D.registerLoader("detection", loadDetection);
+
   window.__dollyViewsLoaded = true;
 })();

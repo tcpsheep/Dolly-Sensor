@@ -76,6 +76,8 @@ type Reputation struct {
 	DstPorts         map[uint16]uint64 `json:"dst_ports"`
 	SYN              uint64            `json:"syn"`
 	ACK              uint64            `json:"ack"`
+	PSHACK           uint64            `json:"psh_ack"`
+	PureACK          uint64            `json:"pure_ack"`
 	PSH              uint64            `json:"psh"`
 	RST              uint64            `json:"rst"`
 	FIN              uint64            `json:"fin"`
@@ -408,6 +410,11 @@ func (s *Store) Observe(obs model.Observation) {
 	rep.UpdatedAt = now
 	rep.SYN += boolToUint(obs.TCPFlags.Has(model.TCPSYN))
 	rep.ACK += boolToUint(obs.TCPFlags.Has(model.TCPACK))
+	// PSH-ACK vs pure-ACK: the receiver-vs-sender rhythm of a healthy
+	// conversation. A source that only ever pushes data (PSH-ACK) and never
+	// acknowledges (pure ACK) is a one-way blast, not a conversation.
+	rep.PSHACK += boolToUint(obs.TCPFlags.Has(model.TCPPSH) && obs.TCPFlags.Has(model.TCPACK))
+	rep.PureACK += boolToUint(obs.TCPFlags.Has(model.TCPACK) && !obs.TCPFlags.Has(model.TCPPSH))
 	rep.PSH += boolToUint(obs.TCPFlags.Has(model.TCPPSH))
 	rep.RST += boolToUint(obs.TCPFlags.Has(model.TCPRST))
 	rep.FIN += boolToUint(obs.TCPFlags.Has(model.TCPFIN))
@@ -659,9 +666,9 @@ func (s *Store) TrustScore(dst, src netip.Addr) float64 {
 }
 
 // SourceSummary returns the sampled counters used by detection.
-func (s *Store) SourceSummary(dst, src netip.Addr) (syn, ack uint64, trust float64, manual bool) {
+func (s *Store) SourceSummary(dst, src netip.Addr) (syn, ack, pshAck, pureAck uint64, trust float64, manual bool) {
 	if !dst.IsValid() || !src.IsValid() {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -673,7 +680,7 @@ func (s *Store) SourceSummary(dst, src netip.Addr) (syn, ack uint64, trust float
 	if rep == nil {
 		return
 	}
-	return rep.SYN, rep.ACK, rep.Trust(), rep.Manual
+	return rep.SYN, rep.ACK, rep.PSHACK, rep.PureACK, rep.Trust(), rep.Manual
 }
 
 func increment[K comparable](m map[K]uint64, key K, max int) {

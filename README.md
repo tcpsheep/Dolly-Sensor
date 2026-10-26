@@ -36,7 +36,7 @@ the UI. A second binary generates synthetic sFlow for lab use.
 |---|---|
 | **Category** | Out-of-band, flow-based DDoS detection and mitigation |
 | **Telemetry** | sFlow v5 over UDP |
-| **Detection** | Blocklists, SYN/ACK asymmetry, malformed-packet share, source reputation, volumetric scoring, warm-up and trust |
+| **Detection** | Blocklists, SYN/ACK and PSH-ACK/pure-ACK asymmetry, TTL entropy, carpet-bomb sweeps, malformed-packet share, source reputation, volumetric scoring, warm-up and trust — every weight live-tunable from the dashboard |
 | **Mitigation** | BGP Flowspec (RFC 8955/8956) and RTBH (RFC 3882), IPv4 |
 | **Policy** | Persistent rules engine: standing and conditional rules, per-source conditions, loadable rule packs (`.dly`), dashboard editor, JSON API |
 | **Dependencies** | Go standard library only — no modules, no database, no JS toolchain |
@@ -482,9 +482,25 @@ directly; there are no network-type or sensitivity presets to select.
   "rate_window_seconds": 5,
   "cooldown": "10m",
   "warmup_windows": 30,
-  "trust_exemption_score": 70
+  "trust_exemption_score": 70,
+  "sweep": {
+    "enabled": true,
+    "min_destinations": 16,
+    "prefix_bits": 24,
+    "min_packets": 200,
+    "action": "rate-limit",
+    "ttl_min_packets": 100
+  }
 }
 ```
+
+Every scoring weight — volumetric points, z-score tiers, SYN/PSH-ACK asymmetry
+ratios, trust discounts, RTBH gates — also lives in the configuration under
+`detection.signals` (see `config.example.json` for the full explicit set).
+All of it is live-tunable from the dashboard's **Detection** view via
+`GET`/`PUT /api/detection`; changes apply immediately without a restart and
+preserve learned baselines. Mirror durable values in `config.json` so they
+survive a restart.
 
 Detection is purely stateless: no connection table is maintained, and detection relies
 on sampled rates, protocol and SYN mixes, reputation, blocklists, and application
@@ -502,6 +518,10 @@ would be guesswork, not proof.
 - `warmup_windows` — how long a new destination stays in the learning phase with a
   capped score.
 - `trust_exemption_score` — trust level above which a source gets additional patience.
+- `sweep` — cross-destination detection: one external source touching many protected
+  IPs (carpet bombing) raises a critical alert and a source-scoped Flowspec rule
+  aimed at the sprayed prefix, and a source whose TTL values look randomised or
+  impossible (many distinct TTLs, TTL ≤ 1) raises a TTL anomaly alert.
 - `cooldown` — suppresses repeated alert attention, not evaluation and not an active
   mitigation.
 
@@ -605,6 +625,8 @@ Served from the Go binary with no build step. Views:
 - **Blocklist** — entry counts, loaded files, manual additions, reload.
 - **Rules** — the full rules engine: catalog in evaluation order, editor, preview,
   drag-and-drop ordering, persistence state.
+- **Detection** — live tuning of every rate, asymmetry, share, tier, and score
+  weight, plus the current cross-destination sweep table.
 - **Mitigation** — BGP state, active announcements, expiry, failures, withdrawal.
 - **Settings** — effective configuration and operational status.
 

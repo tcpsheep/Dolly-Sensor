@@ -10,7 +10,7 @@
 - Language: Go 1.23+ (standard library only)
 - Telemetry: sFlow v5 over UDP (default port 6343)
 - Mitigation: BGP Flowspec (RFC 8955/8956) and RTBH (RFC 3882), IPv4
-- Detection: blocklists, SYN/ACK asymmetry, malformed-packet share, source reputation, volumetric scoring, warm-up and trust
+- Detection: blocklists, SYN/ACK and PSH-ACK/pure-ACK asymmetry, TTL entropy, carpet-bomb sweeps, malformed-packet share, source reputation, volumetric scoring, warm-up and trust; every weight live-tunable from the dashboard
 - Policy: persistent rules engine, standing and conditional rules, per-source conditions, loadable application rule packs (.dly), dashboard editor and JSON API
 - Dashboard: served by the binary over server-sent events, no build step, no authentication
 - Safe defaults: BGP disabled (actions simulated), dashboard on 127.0.0.1:8080, no protect-everything mode
@@ -30,6 +30,7 @@
 - `internal/packet`: packet and application-layer decoding
 - `internal/intel`: destination profiles, source reputation, persistence
 - `internal/detect`: detection funnel and scoring
+- `internal/sweep`: cross-destination carpet-bomb and TTL-entropy tracking
 - `internal/rules`: rules engine, persistence, and embedded rule packs (.dly templates)
 - `internal/bgp`: Flowspec/RTBH encoding and BGP speaker
 - `internal/mitigate`: action lifecycle, deduplication, expiry

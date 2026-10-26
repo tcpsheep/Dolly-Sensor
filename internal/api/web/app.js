@@ -31,6 +31,7 @@
     inspector: ["Inspector", "Recent sampled observations and decoded application context"],
     blocklist: ["Blocklist", "Deterministic source blocking with protected-space guardrails"],
     rules: ["Rules", "Standing and conditional policies evaluated on sampled traffic"],
+    detection: ["Detection", "Live tuning of every rate, asymmetry, and signal weight"],
     mitigation: ["Mitigation", "Automated containment state and BGP action history"],
     settings: ["Settings", "Effective configuration and safety posture (read-only)"],
   };
@@ -38,6 +39,8 @@
   const ALERT_TYPES = {
     volumetric: "Volumetric attack",
     syn_flood: "Probable SYN flood",
+    sweep: "Carpet bomb / subnet sweep",
+    ttl_anomaly: "TTL anomaly",
     blocklist: "Blocklisted source",
     rule_trigger: "Rule triggered",
     test: "Delivery test",

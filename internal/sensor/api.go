@@ -20,6 +20,7 @@ import (
 	"dollysensor/internal/mitigate"
 	"dollysensor/internal/model"
 	"dollysensor/internal/notify"
+	"dollysensor/internal/sweep"
 	"dollysensor/internal/version"
 )
 
@@ -135,7 +136,17 @@ type IntelligenceData struct {
 	Destinations []intel.DestinationSummary `json:"destinations"`
 	ManualTrust  []intel.TrustedSource      `json:"manual_trust"`
 	Detection    detect.Parameters          `json:"detection"`
+	Sweeps       []sweep.SourceSweep        `json:"sweeps"`
 	Profiles     int                        `json:"profiles"`
+}
+
+// DetectionTuningData is the live detection tuning view: every rate, share,
+// asymmetry, and score weight the detector uses, plus the sweeps the
+// cross-destination layer currently sees.
+type DetectionTuningData struct {
+	Detection   config.DetectionConfig `json:"detection"`
+	Sweeps      []sweep.SourceSweep    `json:"sweeps"`
+	RestartOnly []string               `json:"restart_only"`
 }
 
 // PacketFilter narrows recent observation searches.
@@ -160,7 +171,7 @@ type SettingsData struct {
 // DestinationRows merges live rates, durable profiles, and detection state.
 func (s *Sensor) DestinationRows(limit int) []DestinationRow {
 	now := time.Now()
-	snapshots := s.aggregate.SnapshotAll(now, s.cfg.Detection.RateWindowSeconds)
+	snapshots := s.aggregate.SnapshotAll(now, s.detection().RateWindowSeconds)
 	profiles := s.intel.Summaries()
 	states := map[string]detect.State{}
 	for _, state := range s.detector.States() {
@@ -275,7 +286,7 @@ func (s *Sensor) DestinationDetail(destination string) (DestinationDetailData, e
 	if detail, ok := s.intel.Detail(dst, 200); ok {
 		data.Profile = &detail
 	}
-	if live, ok := s.aggregate.Snapshot(dst, time.Now(), s.cfg.Detection.RateWindowSeconds); ok {
+	if live, ok := s.aggregate.Snapshot(dst, time.Now(), s.detection().RateWindowSeconds); ok {
 		data.Live = &live
 	}
 	if state, ok := s.detector.State(dst); ok {
@@ -490,18 +501,70 @@ func (s *Sensor) WithdrawMitigation(id, reason string) (*mitigate.Action, error)
 
 // Intelligence returns reputation and destination learning facts.
 func (s *Sensor) Intelligence() IntelligenceData {
+	sweeps, _ := s.sweeper.Snapshot(time.Now())
 	return IntelligenceData{
 		Reputations:  s.intel.Reputations(500),
 		Destinations: s.intel.Summaries(),
 		ManualTrust:  s.intel.ManualTrust(),
 		Detection:    s.detector.Parameters(),
+		Sweeps:       sweeps,
 		Profiles:     s.intel.Count(),
 	}
 }
 
+// DetectionTuning returns the live detection configuration for the dashboard.
+func (s *Sensor) DetectionTuning() DetectionTuningData {
+	sweeps, _ := s.sweeper.Snapshot(time.Now())
+	return DetectionTuningData{
+		Detection: s.detection(),
+		Sweeps:    sweeps,
+		// These cannot change without restarting the evaluation loop.
+		RestartOnly: []string{"evaluation_interval"},
+	}
+}
+
+// UpdateDetection validates and applies new detection tuning at runtime.
+// Learned baselines and reputations are preserved; only thresholds, weights,
+// and gates change. The applied configuration is returned so the dashboard can
+// confirm exactly what is now in force.
+func (s *Sensor) UpdateDetection(input config.DetectionConfig) (config.DetectionConfig, error) {
+	applied := config.NormalizeDetection(input)
+	if err := config.ValidateDetection(applied); err != nil {
+		return applied, err
+	}
+	s.cfgMu.Lock()
+	s.cfg.Detection = applied
+	s.cfgMu.Unlock()
+	s.detector.Update(detect.Options{
+		Detection: applied,
+		Intel:     s.intel,
+		Protected: s.protected,
+		Trusted:   s.trusted,
+	})
+	s.alerts.SetCooldown(applied.Cooldown.Std())
+	s.sweepOn.Store(applied.Sweep.Enabled)
+	s.sweeper.SetPrefixBits(applied.Sweep.PrefixBits)
+	s.hub.Publish(events.Event{Type: "detection", Data: map[string]any{
+		"threshold":     applied.Threshold,
+		"persistence":   applied.Persistence,
+		"pps_floor":     applied.PPSFloor,
+		"bps_floor":     applied.BPSFloor,
+		"sweep_enabled": applied.Sweep.Enabled,
+	}})
+	s.logger.Info("detection tuning updated",
+		"threshold", applied.Threshold,
+		"persistence", applied.Persistence,
+		"pps_floor", applied.PPSFloor,
+		"bps_floor", applied.BPSFloor,
+	)
+	return applied, nil
+}
+
 // Settings returns effective configuration without the webhook URL.
 func (s *Sensor) Settings() SettingsData {
+	s.cfgMu.RLock()
 	redacted := s.cfg
+	s.cfgMu.RUnlock()
 	redacted.Alerting.WebhookURL = ""
 	return SettingsData{
 		Config:            redacted,
@@ -616,7 +679,7 @@ func (s *Sensor) Overview() OverviewData {
 	now := time.Now()
 	return OverviewData{
 		Status:            s.Status(),
-		Global:            s.aggregate.Global(now, s.cfg.Detection.RateWindowSeconds, 300),
+		Global:            s.aggregate.Global(now, s.detection().RateWindowSeconds, 300),
 		Detection:         s.detector.Parameters(),
 		Destinations:      s.DestinationRows(200),
 		RecentAlerts:      s.alerts.Snapshot(20, ""),

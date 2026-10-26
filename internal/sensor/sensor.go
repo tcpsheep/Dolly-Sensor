@@ -30,6 +30,7 @@ import (
 	"dollysensor/internal/notify"
 	"dollysensor/internal/rules"
 	"dollysensor/internal/sflow"
+	"dollysensor/internal/sweep"
 	"dollysensor/internal/version"
 )
 
@@ -58,6 +59,10 @@ type Sensor struct {
 	cfg      config.Config
 	warnings []string
 	logger   *slog.Logger
+	// cfgMu guards runtime mutation of s.cfg (dashboard detection tuning).
+	// Cold-path readers of the whole struct take the lock; hot paths read
+	// immutable sections that tuning never touches.
+	cfgMu sync.RWMutex
 
 	startedAt time.Time
 	protected *netutil.PrefixSet
@@ -67,6 +72,7 @@ type Sensor struct {
 	intel     *intel.Store
 	aggregate *aggregate.Registry
 	detector  *detect.Detector
+	sweeper   *sweep.Tracker
 	alerts    *alerts.Store
 	hub       *events.Hub
 	notifier  *notify.Notifier
@@ -102,6 +108,7 @@ type Sensor struct {
 	gate       *findingGate
 	lastReload atomic.Int64
 	running    atomic.Bool
+	sweepOn    atomic.Bool
 }
 
 // New constructs a Sensor and loads durable state. No sockets are opened and no
@@ -159,6 +166,7 @@ func New(cfg config.Config, loadedWarnings []string, logger *slog.Logger) (*Sens
 		blocklist: lists,
 		intel:     profiles,
 		aggregate: aggregate.New(),
+		sweeper:   sweep.New(cfg.Detection.Sweep.PrefixBits),
 		alerts:    alerts.New(cfg.Memory.AlertHistory, cfg.Detection.Cooldown.Std()),
 		hub:       events.New(),
 		ruleStore: ruleStore,
@@ -166,6 +174,7 @@ func New(cfg config.Config, loadedWarnings []string, logger *slog.Logger) (*Sens
 		findings:  make(chan detect.Finding, 2048),
 		gate:      newFindingGate(2 * time.Second),
 	}
+	s.sweepOn.Store(cfg.Detection.Sweep.Enabled)
 	s.ruleObservations = make(chan model.Observation, cfg.Rules.EvaluationQueue)
 	s.notifier = notify.New(notify.Options{
 		URL:     cfg.Alerting.WebhookURL,
@@ -435,6 +444,9 @@ func (s *Sensor) processObservation(obs model.Observation, now time.Time) {
 		s.intel.Observe(obs)
 		s.aggregate.Observe(obs, now)
 	}
+	if obs.DstProtected && !obs.SrcProtected && s.sweepOn.Load() {
+		s.sweeper.Observe(obs, now)
+	}
 	s.ring.Add(obs)
 	if obs.DstProtected && s.ruleStore != nil {
 		select {
@@ -543,7 +555,18 @@ func (s *Sensor) Version() string { return version.Version }
 
 // Config returns the effective configuration. Callers rendering it for the
 // dashboard must redact secrets.
-func (s *Sensor) Config() config.Config { return s.cfg }
+func (s *Sensor) Config() config.Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
+// detection returns the live detection tuning.
+func (s *Sensor) detection() config.DetectionConfig {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg.Detection
+}
 
 // Warnings returns startup warnings.
 func (s *Sensor) Warnings() []string { return append([]string(nil), s.warnings...) }
